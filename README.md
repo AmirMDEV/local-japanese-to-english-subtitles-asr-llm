@@ -47,11 +47,7 @@ They are saved in a folder named like this:
 ## Fastest Way To Use It
 
 1. Download the newest release files from the [Releases](https://github.com/AmirMDEV/subtitle-tool/releases) page.
-2. Put all of these `.zip` files in the same folder:
-   - `SubtitleTool-windows-x64-app.zip`
-   - `SubtitleTool-windows-x64-torch-lib-part1.zip`
-   - `SubtitleTool-windows-x64-torch-lib-part2.zip`
-   - `SubtitleTool-windows-x64-torch-extra.zip`
+2. Put every `.zip` file from that release into the same folder.
 3. Unzip them all into the same place, like `C:\SubtitleTool`.
 4. If Windows asks whether to merge folders, say `Yes`.
 5. Run `SubtitleTool.exe`.
@@ -74,11 +70,11 @@ The app itself does not ship with the big AI models inside it. You pick where th
 
 The Windows app is split into a few `.zip` files because the AI runtime is large.
 
-That does not mean you have to install four different apps.
+That does not mean you have to install lots of different apps.
 
 It just means:
 
-1. Download all the `.zip` files for the same release.
+1. Download every `.zip` file for the same release.
 2. Extract them into the same folder.
 3. Let Windows merge the folders together.
 4. Run `SubtitleTool.exe`.
