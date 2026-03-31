@@ -1,6 +1,6 @@
-# Subtitle Tool
+# Local Japanese to English subtitles (ASR + LLM)
 
-Desktop app for turning Japanese video into subtitle files, then improving the English with a local LLM using whole-video notes or time-range notes.
+Desktop app for creating Japanese-to-English subtitles locally with Kotoba ASR and Ollama, then reinterpreting the English using whole-video notes or scene-specific notes.
 
 It is made for long videos, batch jobs, and careful subtitle cleanup.
 

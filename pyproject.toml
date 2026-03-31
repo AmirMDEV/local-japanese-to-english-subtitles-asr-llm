@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "subtitle-tool"
 version = "0.2.0"
-description = "Desktop tool for Japanese transcription, English subtitle generation, and context-guided subtitle rewrites."
+description = "Local Japanese-to-English subtitles with Kotoba ASR, Ollama, and context-guided subtitle reinterpretation."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
