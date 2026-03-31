@@ -6,7 +6,15 @@ from pathlib import Path
 import pytest
 
 from local_subtitle_stack.config import AppConfig, CachePaths, ModelConfig, ToolPaths, default_profiles
-from local_subtitle_stack.domain import ChunkPlan, Cue, SceneContextBlock
+from local_subtitle_stack.domain import (
+    ChunkPlan,
+    Cue,
+    SceneContextBlock,
+    SOURCE_KIND_SUBTITLE,
+    SOURCE_KIND_VIDEO,
+    TRANSLATION_SOURCE_DIRECT_EN,
+    TRANSLATION_SOURCE_JA,
+)
 from local_subtitle_stack.guards import ResourceSnapshot
 from local_subtitle_stack.integrations import SubtitleEditClient
 from local_subtitle_stack.queue import QueueError, QueueStore
@@ -136,6 +144,13 @@ def build_service(tmp_path: Path, ollama: SuccessfulOllama) -> WorkerService:
         subtitle_edit=FakeSubtitleEdit(),
         ollama=ollama,
     )
+
+
+def write_srt_fixture(path: Path, entries: list[tuple[str, str, str]]) -> None:
+    blocks: list[str] = []
+    for index, (start, end, text) in enumerate(entries, start=1):
+        blocks.append(f"{index}\n{start} --> {end}\n{text}\n")
+    path.write_text("\n".join(blocks), encoding="utf-8")
 
 
 def test_worker_creates_local_and_exported_outputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -467,3 +482,176 @@ def test_rebuild_english_failure_keeps_previous_english_outputs(
     assert (job_dir / loaded.artifacts["adapted_srt"]).read_text(encoding="utf-8") == original_adapted_local
     assert (export_dir / loaded.artifacts["literal_srt"]).read_text(encoding="utf-8") == original_literal_export
     assert (export_dir / loaded.artifacts["adapted_srt"]).read_text(encoding="utf-8") == original_adapted_export
+
+
+def test_import_existing_video_linked_japanese_and_reference_tracks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    ollama = SuccessfulOllama()
+    service = build_service(tmp_path, ollama)
+    video = tmp_path / "imported-scene.mp4"
+    video.write_text("video", encoding="utf-8")
+    ja_srt = tmp_path / "imported-scene.ja.srt"
+    reference_srt = tmp_path / "imported-scene.reference.srt"
+    write_srt_fixture(
+        ja_srt,
+        [
+            ("00:00:00,000", "00:00:01,200", "motto shite"),
+            ("00:00:01,600", "00:00:03,100", "onegai"),
+        ],
+    )
+    write_srt_fixture(
+        reference_srt,
+        [
+            ("00:00:00,000", "00:00:01,000", "please keep going"),
+        ],
+    )
+
+    manifest = service.import_existing(
+        profile="default",
+        video=video,
+        japanese=ja_srt,
+        reference=reference_srt,
+        context="Bath scene.",
+    )
+
+    job_dir, loaded = service.store.find_job(manifest.job_id)
+    preview = service.preview_rows(manifest.job_id)
+
+    assert job_dir.parent.name == "done"
+    assert loaded.source_kind == SOURCE_KIND_VIDEO
+    assert loaded.translation_source_role == TRANSLATION_SOURCE_JA
+    assert loaded.imported_tracks["ja"] == str(ja_srt.resolve())
+    assert loaded.imported_tracks["reference"] == str(reference_srt.resolve())
+    assert preview[0]["japanese"] == "motto shite"
+    assert preview[0]["reference"] == "please keep going"
+    assert (Path(loaded.export_dir) / loaded.artifacts["ja_srt"]).exists()
+
+
+def test_import_existing_english_only_rebuilds_without_asr(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    ollama = SuccessfulOllama()
+    service = build_service(tmp_path, ollama)
+    primary_srt = tmp_path / "english-only.srt"
+    write_srt_fixture(
+        primary_srt,
+        [
+            ("00:00:00,000", "00:00:01,200", "I match my mother's body type."),
+            ("00:00:01,600", "00:00:03,100", "Look at my chest."),
+        ],
+    )
+
+    manifest = service.import_existing(
+        profile="default",
+        primary_subtitle=primary_srt,
+        context="Breast and body-type comparison scene.",
+    )
+    rebuilt = service.rebuild_english(
+        manifest.job_id,
+        batch_label="Imported batch",
+        overall_context="Breast and body-type comparison scene.",
+        scene_contexts=[],
+    )
+
+    job_dir, loaded = service.store.find_job(rebuilt.job_id)
+    preview = service.preview_rows(rebuilt.job_id)
+
+    assert loaded.source_kind == SOURCE_KIND_SUBTITLE
+    assert loaded.translation_source_role == TRANSLATION_SOURCE_DIRECT_EN
+    assert not (job_dir / loaded.artifacts["ja_cues"]).exists()
+    assert preview[0]["literal_english"] == "literal line 1"
+    assert preview[0]["adapted_english"] == "adapted line 1"
+    assert any(
+        "rewriting English subtitle lines into cleaner direct English" in prompt
+        for _model, prompt in ollama.calls
+    )
+    assert any("for English dialogue" in prompt for _model, prompt in ollama.calls if '"literal_en"' in prompt)
+
+
+def test_import_existing_reference_lines_are_injected_into_translation_prompts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    ollama = SuccessfulOllama()
+    service = build_service(tmp_path, ollama)
+    primary_srt = tmp_path / "scene-with-reference.srt"
+    reference_srt = tmp_path / "scene-with-reference.reference.srt"
+    write_srt_fixture(
+        primary_srt,
+        [
+            ("00:00:00,000", "00:00:01,200", "mune"),
+        ],
+    )
+    write_srt_fixture(
+        reference_srt,
+        [
+            ("00:00:00,000", "00:00:01,200", "Talking about breasts here."),
+        ],
+    )
+
+    manifest = service.import_existing(
+        profile="default",
+        primary_subtitle=primary_srt,
+        japanese=primary_srt,
+        reference=reference_srt,
+    )
+    service.rebuild_english(
+        manifest.job_id,
+        batch_label=None,
+        overall_context=None,
+        scene_contexts=[],
+    )
+
+    assert any("Talking about breasts here." in prompt for _model, prompt in ollama.calls)
+
+
+def test_import_existing_reuses_matching_job_instead_of_duplicating(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    primary_srt = tmp_path / "reuse-me.srt"
+    write_srt_fixture(
+        primary_srt,
+        [
+            ("00:00:00,000", "00:00:01,000", "hello there"),
+        ],
+    )
+
+    first = service.import_existing(profile="default", primary_subtitle=primary_srt)
+    second = service.import_existing(profile="default", primary_subtitle=primary_srt)
+    rows = service.status_rows()
+
+    assert first.job_id == second.job_id
+    assert [row["job_id"] for row in rows] == [first.job_id]
+
+
+def test_import_existing_requires_a_real_source_track(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    video = tmp_path / "no-source.mp4"
+    video.write_text("video", encoding="utf-8")
+    reference_srt = tmp_path / "no-source.reference.srt"
+    write_srt_fixture(
+        reference_srt,
+        [
+            ("00:00:00,000", "00:00:01,000", "reference only"),
+        ],
+    )
+
+    with pytest.raises(QueueError, match="Japanese or Direct English subtitle source track"):
+        service.import_existing(
+            profile="default",
+            video=video,
+            reference=reference_srt,
+        )

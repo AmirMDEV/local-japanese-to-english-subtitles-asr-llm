@@ -103,6 +103,7 @@ def build_context_notes(
     group: list[Cue],
     global_context: str | None,
     scene_contexts: list[SceneContextBlock],
+    reference_cues: list[Cue] | None = None,
 ) -> str | None:
     sections: list[str] = []
     global_note = (global_context or "").strip()
@@ -125,6 +126,24 @@ def build_context_notes(
                 for block in matches
             ]
             sections.append("Scene-specific context:\n" + "\n".join(scene_lines))
+
+    if reference_cues:
+        group_start = min((cue.start for cue in group), default=0.0)
+        group_end = max((cue.end for cue in group), default=0.0)
+        overlaps = [
+            cue
+            for cue in reference_cues
+            if cue.text.strip() and cue.start <= group_end and cue.end >= group_start
+        ]
+        if overlaps:
+            reference_lines = [
+                f"- {format_timecode(cue.start)} to {format_timecode(cue.end)}: {cue.text.strip()}"
+                for cue in overlaps
+            ]
+            sections.append(
+                "Reference subtitle lines (use only as optional ambiguity hints):\n"
+                + "\n".join(reference_lines)
+            )
 
     if not sections:
         return None
@@ -179,6 +198,7 @@ def build_adapted_prompt(
     glossary: list[dict[str, str]],
     metadata: str,
     context_notes: str | None = None,
+    source_language: str = "Japanese",
 ) -> str:
     glossary_text = "\n".join(
         f"- {item.get('jp', '')} => {item.get('preferred_en') or item.get('literal_en', '')} ({item.get('notes', '')})"
@@ -194,7 +214,7 @@ def build_adapted_prompt(
         "context_notes": context_notes or "",
     }
     return (
-        "You are adapting literal English subtitle lines into natural subtitle English for Japanese dialogue.\n"
+        f"You are adapting literal English subtitle lines into natural subtitle English for {source_language} dialogue.\n"
         "Rules:\n"
         "- Keep the same cue count and the same order.\n"
         "- Preserve the intended meaning, tone, and speaker relationship.\n"
@@ -207,6 +227,37 @@ def build_adapted_prompt(
         f"Context notes: {context_notes or 'none'}\n"
         f"Glossary:\n{glossary_text or '- none'}\n"
         f"Payload:\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+    )
+
+
+def build_direct_english_rewrite_prompt(
+    group: list[Cue],
+    glossary: list[dict[str, str]],
+    metadata: str,
+    context_notes: str | None,
+) -> str:
+    glossary_text = "\n".join(
+        f"- {item.get('jp', '')} => {item.get('preferred_en') or item.get('literal_en', '')} ({item.get('notes', '')})"
+        for item in glossary
+    )
+    cues_json = json.dumps(
+        [{"index": cue.index, "text": cue.text} for cue in group],
+        ensure_ascii=False,
+        indent=2,
+    )
+    return (
+        "You are rewriting English subtitle lines into cleaner direct English.\n"
+        "Rules:\n"
+        "- Preserve the intended meaning and the timing-aligned cue count.\n"
+        "- Use context notes only to resolve ambiguity or improve wording fit.\n"
+        "- Do not censor, sanitize, or moralise the source meaning.\n"
+        "- Keep each translation aligned 1:1 with the input cue count.\n"
+        "- Return JSON only in the shape {\"translations\": [\"...\"]}.\n"
+        "- Do not include notes.\n"
+        f"Metadata: {metadata or 'none'}\n"
+        f"Context notes: {context_notes or 'none'}\n"
+        f"Glossary:\n{glossary_text or '- none'}\n"
+        f"Cues:\n{cues_json}\n"
     )
 
 
@@ -256,6 +307,44 @@ def format_srt_timestamp(value: float) -> str:
     seconds = total_ms // 1000
     millis = total_ms % 1000
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+
+
+def parse_srt_timestamp(value: str) -> float:
+    match = re.fullmatch(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})", value.strip())
+    if not match:
+        raise ValueError(f"Invalid SRT timestamp: {value}")
+    hours, minutes, seconds, millis = (int(item) for item in match.groups())
+    return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
+
+
+def parse_srt(path: Path) -> list[Cue]:
+    text = path.read_text(encoding="utf-8-sig")
+    blocks = re.split(r"\n\s*\n", text.replace("\r\n", "\n").strip())
+    cues: list[Cue] = []
+    for block_index, block in enumerate(blocks, start=1):
+        lines = [line.rstrip() for line in block.split("\n") if line.strip()]
+        if not lines:
+            continue
+        if re.fullmatch(r"\d+", lines[0]):
+            lines = lines[1:]
+        if len(lines) < 2:
+            raise ValueError(f"Malformed SRT block {block_index} in {path.name}")
+        timestamp_line = lines[0]
+        match = re.fullmatch(
+            r"\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*",
+            timestamp_line,
+        )
+        if not match:
+            raise ValueError(f"Malformed SRT timestamp in block {block_index} of {path.name}")
+        cue_text = "\n".join(lines[1:]).strip()
+        if not cue_text:
+            continue
+        start = parse_srt_timestamp(match.group(1))
+        end = parse_srt_timestamp(match.group(2))
+        if end <= start:
+            raise ValueError(f"SRT end time must be after start time in block {block_index} of {path.name}")
+        cues.append(Cue(index=len(cues) + 1, start=start, end=end, text=cue_text))
+    return cues
 
 
 def write_srt(path: Path, cues: list[Cue]) -> None:

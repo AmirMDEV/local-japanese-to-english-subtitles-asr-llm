@@ -15,6 +15,10 @@ from .domain import (
     JobManifest,
     ReviewFlag,
     SceneContextBlock,
+    SOURCE_KIND_SUBTITLE,
+    SOURCE_KIND_VIDEO,
+    TRANSLATION_SOURCE_DIRECT_EN,
+    TRANSLATION_SOURCE_JA,
 )
 from .guards import (
     capture_snapshot,
@@ -32,15 +36,16 @@ from .integrations import (
 )
 from .pipeline import (
     apply_translations,
-    build_context_notes,
     build_adapted_prompt,
-    build_literal_prompt,
+    build_context_notes,
+    build_direct_english_rewrite_prompt,
     build_literal_prompt_with_context,
     combine_chunk_cues,
     cue_groups,
     load_glossary,
     metadata_from_manifest,
     normalize_japanese_cues,
+    parse_srt,
     strict_retry_prompt,
     validate_translation_payload,
     write_review_flags,
@@ -149,6 +154,151 @@ class WorkerService:
             scene_contexts=scene_contexts,
         )
 
+    def detect_existing_subtitles(self, video: Path) -> dict[str, Path]:
+        resolved = video.resolve()
+        stem = resolved.stem
+        output_dir = subtitle_output_dir(resolved)
+        search_roots = [resolved.parent]
+        if output_dir not in search_roots:
+            search_roots.append(output_dir)
+        patterns = {
+            "ja": [
+                f"{stem}.ja.srt",
+                f"{stem}.jp.srt",
+                f"{stem}.japanese.srt",
+            ],
+            "direct": [
+                f"{stem}.en.literal.srt",
+                f"{stem}.en.srt",
+                f"{stem}.english.srt",
+                f"{stem}.srt",
+            ],
+            "easy": [
+                f"{stem}.en.adapted.srt",
+                f"{stem}.adapted.srt",
+            ],
+            "reference": [
+                f"{stem}.reference.srt",
+                f"{stem}.ref.srt",
+            ],
+        }
+        found: dict[str, Path] = {}
+        for role, candidates in patterns.items():
+            for root in search_roots:
+                for filename in candidates:
+                    candidate = root / filename
+                    if candidate.exists():
+                        found[role] = candidate.resolve()
+                        break
+                if role in found:
+                    break
+        return found
+
+    def import_existing(
+        self,
+        *,
+        profile: str,
+        video: Path | None = None,
+        primary_subtitle: Path | None = None,
+        japanese: Path | None = None,
+        direct: Path | None = None,
+        easy: Path | None = None,
+        reference: Path | None = None,
+        series: str | None = None,
+        context: str | None = None,
+        scene_contexts: list[SceneContextBlock] | None = None,
+    ) -> JobManifest:
+        self._require_profile(profile)
+        if bool(video) == bool(primary_subtitle):
+            raise QueueError("Choose either a video or a primary subtitle file.")
+
+        resolved_video = video.resolve() if video else None
+        resolved_primary = primary_subtitle.resolve() if primary_subtitle else None
+        auto_detected = self.detect_existing_subtitles(resolved_video) if resolved_video else {}
+
+        tracks: dict[str, Path] = {}
+        for role, provided in (
+            ("ja", japanese),
+            ("direct", direct),
+            ("easy", easy),
+            ("reference", reference),
+        ):
+            if provided:
+                tracks[role] = provided.resolve()
+            elif role in auto_detected:
+                tracks[role] = auto_detected[role]
+
+        if resolved_primary and "ja" not in tracks and "direct" not in tracks:
+            tracks["direct"] = resolved_primary
+
+        if not tracks:
+            raise QueueError("No subtitle files were provided or detected for import.")
+        if "ja" not in tracks and "direct" not in tracks:
+            raise QueueError("Import needs a Japanese or Direct English subtitle source track.")
+
+        for role, path in list(tracks.items()):
+            if path.suffix.lower() != ".srt":
+                raise QueueError(f"Only .srt files are supported right now: {path.name}")
+            if not path.exists():
+                raise QueueError(f"Subtitle file not found: {path}")
+            tracks[role] = path.resolve()
+
+        source_path = resolved_video or resolved_primary
+        assert source_path is not None
+        translation_source_role = (
+            TRANSLATION_SOURCE_JA if "ja" in tracks else TRANSLATION_SOURCE_DIRECT_EN
+        )
+
+        existing = self._find_job_by_source_path(source_path)
+        if existing is None:
+            manifest = self.store.enqueue(
+                source_path=source_path,
+                profile=profile,
+                series=series,
+                job_context=context,
+                scene_contexts=scene_contexts,
+                source_kind=SOURCE_KIND_VIDEO if resolved_video else SOURCE_KIND_SUBTITLE,
+                linked_video_path=resolved_video,
+                translation_source_role=translation_source_role,
+                imported_tracks={role: str(path) for role, path in tracks.items()},
+            )
+            job_dir, manifest = self.store.find_job(manifest.job_id)
+        else:
+            job_dir, manifest = existing
+            manifest.profile = profile
+            manifest.source_kind = SOURCE_KIND_VIDEO if resolved_video else SOURCE_KIND_SUBTITLE
+            manifest.linked_video_path = str(resolved_video) if resolved_video else None
+            manifest.translation_source_role = translation_source_role
+            manifest.imported_tracks.update({role: str(path) for role, path in tracks.items()})
+            if series is not None:
+                manifest.series = series
+            if context is not None:
+                manifest.job_context = context
+            if scene_contexts is not None:
+                manifest.scene_contexts = list(scene_contexts)
+
+        if series is not None:
+            manifest.series = series
+        if context is not None:
+            manifest.job_context = context
+        if scene_contexts is not None:
+            manifest.scene_contexts = list(scene_contexts)
+
+        self._seed_imported_tracks(job_dir, manifest, tracks)
+        self._mark_imported_source_checkpoints(manifest)
+        manifest.status = JOB_STATUS_COMPLETED
+        manifest.current_stage = STAGE_FINALIZE
+        review_path = job_dir / manifest.artifacts["review"]
+        self._write_review_file(review_path, manifest.review_flags)
+        self._export_text_artifact(
+            review_path,
+            self._output_dir_for_manifest(manifest) / manifest.artifacts["review"],
+        )
+        self._save_manifest(job_dir, manifest)
+        if job_dir.parent != self.store.done_dir:
+            job_dir, manifest = self.store.mark_completed(job_dir, manifest)
+        return manifest
+
     def status_rows(self) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
         for _job_dir, manifest, state in self.store.list_jobs():
@@ -172,15 +322,22 @@ class WorkerService:
         ja_cues = self._load_optional_cues(job_dir, manifest, "ja_cues")
         literal_cues = self._load_optional_cues(job_dir, manifest, "literal_cues")
         adapted_cues = self._load_optional_cues(job_dir, manifest, "adapted_cues")
+        reference_cues = self._load_optional_cues(job_dir, manifest, "reference_cues")
 
         ja_by_index = {cue.index: cue for cue in ja_cues}
         literal_by_index = {cue.index: cue for cue in literal_cues}
         adapted_by_index = {cue.index: cue for cue in adapted_cues}
-        indexes = sorted(set(ja_by_index) | set(literal_by_index) | set(adapted_by_index))
+        reference_by_index = {cue.index: cue for cue in reference_cues}
+        indexes = sorted(set(ja_by_index) | set(literal_by_index) | set(adapted_by_index) | set(reference_by_index))
 
         rows: list[dict[str, str | float | int]] = []
         for cue_index in indexes:
-            anchor = ja_by_index.get(cue_index) or literal_by_index.get(cue_index) or adapted_by_index[cue_index]
+            anchor = (
+                ja_by_index.get(cue_index)
+                or literal_by_index.get(cue_index)
+                or adapted_by_index.get(cue_index)
+                or reference_by_index[cue_index]
+            )
             rows.append(
                 {
                     "cue_index": cue_index,
@@ -189,9 +346,11 @@ class WorkerService:
                     "japanese": ja_by_index.get(cue_index).text if cue_index in ja_by_index else "",
                     "literal_english": literal_by_index.get(cue_index).text if cue_index in literal_by_index else "",
                     "adapted_english": adapted_by_index.get(cue_index).text if cue_index in adapted_by_index else "",
+                    "reference": reference_by_index.get(cue_index).text if cue_index in reference_by_index else "",
                     "has_japanese": cue_index in ja_by_index,
                     "has_literal_english": cue_index in literal_by_index,
                     "has_adapted_english": cue_index in adapted_by_index,
+                    "has_reference": cue_index in reference_by_index,
                 }
             )
         return rows
@@ -204,15 +363,17 @@ class WorkerService:
         japanese_text: str | None = None,
         literal_english_text: str | None = None,
         adapted_english_text: str | None = None,
+        reference_text: str | None = None,
     ) -> JobManifest:
         job_dir, manifest = self.store.find_job(job_id)
         updates = (
-            ("ja_cues", "ja_srt", japanese_text, "Japanese"),
-            ("literal_cues", "literal_srt", literal_english_text, "Direct English"),
-            ("adapted_cues", "adapted_srt", adapted_english_text, "Easy English"),
+            ("ja_cues", "ja_srt", japanese_text, "Japanese", True),
+            ("literal_cues", "literal_srt", literal_english_text, "Direct English", True),
+            ("adapted_cues", "adapted_srt", adapted_english_text, "Easy English", True),
+            ("reference_cues", "reference_srt", reference_text, "Reference subtitle", False),
         )
         updated_any = False
-        for cues_artifact, srt_artifact, text, label in updates:
+        for cues_artifact, srt_artifact, text, label, should_export in updates:
             if text is None:
                 continue
             normalized = text.strip()
@@ -229,8 +390,9 @@ class WorkerService:
             save_cues(cues_path, cues)
             local_srt_path = job_dir / manifest.artifacts[srt_artifact]
             write_srt(local_srt_path, cues)
-            export_dir = self._output_dir_for_manifest(manifest)
-            self._export_text_artifact(local_srt_path, export_dir / manifest.artifacts[srt_artifact])
+            if should_export:
+                export_dir = self._output_dir_for_manifest(manifest)
+                self._export_text_artifact(local_srt_path, export_dir / manifest.artifacts[srt_artifact])
             updated_any = True
 
         if not updated_any:
@@ -262,8 +424,8 @@ class WorkerService:
         scene_contexts: list[SceneContextBlock],
     ) -> JobManifest:
         job_dir, manifest = self.store.find_job(job_id)
-        if not (job_dir / manifest.artifacts["ja_cues"]).exists():
-            raise QueueError("Japanese subtitle lines are not ready yet. Start processing first.")
+        if not self._translation_source_path(job_dir, manifest).exists():
+            raise QueueError("Source subtitle lines are not ready yet for this job.")
 
         self._require_profile(manifest.profile)
         manifest.series = batch_label or None
@@ -276,8 +438,8 @@ class WorkerService:
     def rebuild_english_from_saved_notes(self, job_id: str) -> JobManifest:
         with self.store.acquire_worker_lock():
             job_dir, manifest = self.store.find_job(job_id)
-            if not (job_dir / manifest.artifacts["ja_cues"]).exists():
-                raise QueueError("Japanese subtitle lines are not ready yet. Start processing first.")
+            if not self._translation_source_path(job_dir, manifest).exists():
+                raise QueueError("Source subtitle lines are not ready yet for this job.")
             self._require_profile(manifest.profile)
             self._rebuild_english_transactional(job_dir, manifest)
             return manifest
@@ -303,7 +465,7 @@ class WorkerService:
     def open_review(self, job_id: str | None = None) -> list[Path]:
         job_dir, manifest = self._resolve_target_job(job_id)
         outputs = self._review_output_paths(job_dir, manifest)
-        if not all(path.exists() for path in outputs):
+        if not outputs or not all(path.exists() for path in outputs):
             raise QueueError("Selected job does not have subtitle outputs yet.")
         self.subtitle_edit.open_files(outputs)
         return outputs
@@ -364,6 +526,16 @@ class WorkerService:
         checkpoint = manifest.checkpoint(STAGE_EXTRACT)
         if checkpoint.status == "completed":
             return
+        if self._translation_source_path(job_dir, manifest).exists():
+            manifest.current_stage = STAGE_EXTRACT
+            checkpoint.attempts += 1
+            checkpoint.status = "completed"
+            checkpoint.details = {
+                "mode": "imported-subtitles",
+                "source_role": manifest.translation_source_role,
+            }
+            self._save_manifest(job_dir, manifest)
+            return
         manifest.current_stage = STAGE_EXTRACT
         checkpoint.attempts += 1
         chunks_dir = job_dir / "chunks"
@@ -381,6 +553,16 @@ class WorkerService:
     def _stage_transcribe(self, job_dir: Path, manifest: JobManifest) -> None:
         checkpoint = manifest.checkpoint(STAGE_TRANSCRIBE)
         if checkpoint.status == "completed":
+            return
+        if self._translation_source_path(job_dir, manifest).exists():
+            manifest.current_stage = STAGE_TRANSCRIBE
+            checkpoint.attempts += 1
+            checkpoint.status = "completed"
+            checkpoint.details = {
+                "mode": "imported-subtitles",
+                "source_role": manifest.translation_source_role,
+            }
+            self._save_manifest(job_dir, manifest)
             return
         self._should_pause(job_dir, manifest)
 
@@ -458,7 +640,7 @@ class WorkerService:
         output_srt_artifact: str,
         group_size: int,
         adapted: bool,
-        ja_cues_path: Path | None = None,
+        source_cues_path: Path | None = None,
         literal_input_path: Path | None = None,
         output_cues_path: Path | None = None,
         output_srt_path: Path | None = None,
@@ -474,17 +656,18 @@ class WorkerService:
         profile = self.config.profile(manifest.profile)
         ensure_safe_to_start_job(profile.min_free_ram_translation_mb, profile.max_rss_mb)
 
-        ja_source_path = ja_cues_path or (job_dir / manifest.artifacts["ja_cues"])
+        source_path = source_cues_path or self._translation_source_path(job_dir, manifest)
         literal_source_path = literal_input_path or (job_dir / manifest.artifacts["literal_cues"])
         final_cues_path = output_cues_path or (job_dir / manifest.artifacts[output_artifact])
         final_srt_path = output_srt_path or (job_dir / manifest.artifacts[output_srt_artifact])
         partial_output_path = partial_path or (job_dir / f"{output_artifact}.partial.json")
 
-        ja_cues = load_cues(ja_source_path)
+        source_cues = load_cues(source_path)
         literal_cues = load_cues(literal_source_path) if adapted else []
+        reference_cues = self._reference_cues_for_job(job_dir, manifest)
         glossary = load_glossary(manifest.glossary_path)
         metadata = metadata_from_manifest(manifest.source_name, manifest.series)
-        groups = cue_groups(ja_cues, group_size)
+        groups = cue_groups(source_cues, group_size)
         partial_rows = read_json(partial_output_path, default=[]) or []
         translated_cues = [Cue.from_dict(item) for item in partial_rows]
         start_group = int(checkpoint.details.get("completed_groups", 0))
@@ -494,8 +677,8 @@ class WorkerService:
             group = groups[group_index]
             if adapted:
                 literal_group = literal_cues[group_index * group_size : group_index * group_size + len(group)]
-                prev_context = ja_cues[max(0, group_index * group_size - 2) : group_index * group_size]
-                next_context = ja_cues[
+                prev_context = source_cues[max(0, group_index * group_size - 2) : group_index * group_size]
+                next_context = source_cues[
                     group_index * group_size + len(group) : group_index * group_size + len(group) + 2
                 ]
                 prompt = build_adapted_prompt(
@@ -509,19 +692,31 @@ class WorkerService:
                         group=group,
                         global_context=manifest.job_context,
                         scene_contexts=manifest.scene_contexts,
+                        reference_cues=reference_cues,
                     ),
+                    source_language=self._translation_source_language(manifest),
                 )
             else:
-                prompt = build_literal_prompt_with_context(
+                context_notes = build_context_notes(
                     group=group,
-                    glossary=glossary,
-                    metadata=metadata,
-                    context_notes=build_context_notes(
-                        group=group,
-                        global_context=manifest.job_context,
-                        scene_contexts=manifest.scene_contexts,
-                    ),
+                    global_context=manifest.job_context,
+                    scene_contexts=manifest.scene_contexts,
+                    reference_cues=reference_cues,
                 )
+                if manifest.translation_source_role == TRANSLATION_SOURCE_DIRECT_EN:
+                    prompt = build_direct_english_rewrite_prompt(
+                        group=group,
+                        glossary=glossary,
+                        metadata=metadata,
+                        context_notes=context_notes,
+                    )
+                else:
+                    prompt = build_literal_prompt_with_context(
+                        group=group,
+                        glossary=glossary,
+                        metadata=metadata,
+                        context_notes=context_notes,
+                    )
 
             try:
                 translations = self._run_translation_prompt(model_name, prompt, len(group), adapted=adapted)
@@ -645,6 +840,69 @@ class WorkerService:
     def _source_key(self, path: Path) -> str:
         return str(path.resolve()).casefold()
 
+    def _find_job_by_source_path(self, source_path: Path) -> tuple[Path, JobManifest] | None:
+        target = self._source_key(source_path)
+        for job_dir, manifest, _state in self.store.list_jobs():
+            if self._source_key(Path(manifest.source_path)) == target:
+                return job_dir, manifest
+        return None
+
+    def _translation_source_artifact(self, manifest: JobManifest) -> str:
+        if manifest.translation_source_role == TRANSLATION_SOURCE_DIRECT_EN:
+            return "literal_cues"
+        return "ja_cues"
+
+    def _translation_source_language(self, manifest: JobManifest) -> str:
+        if manifest.translation_source_role == TRANSLATION_SOURCE_DIRECT_EN:
+            return "English"
+        return "Japanese"
+
+    def _translation_source_path(self, job_dir: Path, manifest: JobManifest) -> Path:
+        return job_dir / manifest.artifacts[self._translation_source_artifact(manifest)]
+
+    def _reference_cues_for_job(self, job_dir: Path, manifest: JobManifest) -> list[Cue]:
+        return self._load_optional_cues(job_dir, manifest, "reference_cues")
+
+    def _seed_imported_tracks(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        tracks: dict[str, Path],
+    ) -> None:
+        for role, path in tracks.items():
+            cues = parse_srt(path)
+            if role == "ja":
+                cues = normalize_japanese_cues(cues)
+            artifact_key, srt_key = self._import_role_artifacts(role)
+            local_cues_path = job_dir / manifest.artifacts[artifact_key]
+            local_srt_path = job_dir / manifest.artifacts[srt_key]
+            save_cues(local_cues_path, cues)
+            write_srt(local_srt_path, cues)
+            if role in {"ja", "direct", "easy"}:
+                export_dir = self._output_dir_for_manifest(manifest)
+                self._export_text_artifact(local_srt_path, export_dir / manifest.artifacts[srt_key])
+
+    def _import_role_artifacts(self, role: str) -> tuple[str, str]:
+        mapping = {
+            "ja": ("ja_cues", "ja_srt"),
+            "direct": ("literal_cues", "literal_srt"),
+            "easy": ("adapted_cues", "adapted_srt"),
+            "reference": ("reference_cues", "reference_srt"),
+        }
+        return mapping[role]
+
+    def _mark_imported_source_checkpoints(self, manifest: JobManifest) -> None:
+        detail = {
+            "mode": "imported-subtitles",
+            "source_role": manifest.translation_source_role,
+        }
+        extract_checkpoint = manifest.checkpoint(STAGE_EXTRACT)
+        extract_checkpoint.status = "completed"
+        extract_checkpoint.details = dict(detail)
+        transcribe_checkpoint = manifest.checkpoint(STAGE_TRANSCRIBE)
+        transcribe_checkpoint.status = "completed"
+        transcribe_checkpoint.details = dict(detail)
+
     def _resolve_target_job(self, job_id: str | None) -> tuple[Path, JobManifest]:
         if job_id:
             return self.store.find_job(job_id)
@@ -665,16 +923,16 @@ class WorkerService:
     def _review_output_paths(self, job_dir: Path, manifest: JobManifest) -> list[Path]:
         export_dir = self._output_dir_for_manifest(manifest)
         exported = [
-            export_dir / manifest.artifacts["ja_srt"],
-            export_dir / manifest.artifacts["literal_srt"],
-            export_dir / manifest.artifacts["adapted_srt"],
+            export_dir / manifest.artifacts[artifact]
+            for artifact in ("ja_srt", "literal_srt", "adapted_srt")
+            if (export_dir / manifest.artifacts[artifact]).exists()
         ]
-        if all(path.exists() for path in exported):
+        if exported:
             return exported
         return [
-            job_dir / manifest.artifacts["ja_srt"],
-            job_dir / manifest.artifacts["literal_srt"],
-            job_dir / manifest.artifacts["adapted_srt"],
+            job_dir / manifest.artifacts[artifact]
+            for artifact in ("ja_srt", "literal_srt", "adapted_srt")
+            if (job_dir / manifest.artifacts[artifact]).exists()
         ]
 
     def _export_text_artifact(self, source_path: Path, target_path: Path) -> None:
@@ -784,6 +1042,8 @@ class WorkerService:
         output_dir = self._output_dir_for_manifest(manifest)
         for artifact in ("ja_srt", "literal_srt", "adapted_srt", "review"):
             source_path = job_dir / manifest.artifacts[artifact]
+            if not source_path.exists():
+                continue
             target_path = output_dir / manifest.artifacts[artifact]
             self._export_text_artifact(source_path, target_path)
         return output_dir

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "subtitle-tool"
-version = "0.1.0"
-description = "Local Japanese video transcription and English subtitle generation tool."
+version = "0.2.0"
+description = "Desktop tool for Japanese transcription, English subtitle generation, and context-guided subtitle rewrites."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 license = { text = "MIT" }
@@ -21,14 +21,18 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "Pillow>=11.0",
   "pytest>=8.3",
 ]
 gpu = [
   "torch>=2.6",
 ]
+build = [
+  "pyinstaller>=6.16",
+]
 
 [project.scripts]
-subtitle-tool = "local_subtitle_stack.cli:main"
+subtitle-tool = "local_subtitle_stack.launcher:main"
 subtitle-stack = "local_subtitle_stack.cli:main"
 
 [tool.setuptools]

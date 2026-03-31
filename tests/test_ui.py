@@ -53,6 +53,8 @@ class FakeService:
                 "ja_cues": "ja.cues.json",
                 "literal_cues": "literal.cues.json",
                 "adapted_cues": "adapted.cues.json",
+                "reference_srt": f"{Path(filename).stem}.reference.srt",
+                "reference_cues": "reference.cues.json",
             }
             self.job_dirs[job_id] = Path(f"C:/queue/{job_id}")
             self.manifests[job_id] = manifest
@@ -64,9 +66,11 @@ class FakeService:
                     "japanese": f"jp {suffix} 1",
                     "literal_english": f"literal {suffix} 1",
                     "adapted_english": f"adapted {suffix} 1",
+                    "reference": f"reference {suffix} 1" if suffix == "one" else "",
                     "has_japanese": True,
                     "has_literal_english": True,
                     "has_adapted_english": True,
+                    "has_reference": suffix == "one",
                 },
                 {
                     "cue_index": 2,
@@ -75,9 +79,11 @@ class FakeService:
                     "japanese": f"jp {suffix} 2",
                     "literal_english": f"literal {suffix} 2",
                     "adapted_english": f"adapted {suffix} 2",
+                    "reference": "",
                     "has_japanese": True,
                     "has_literal_english": True,
                     "has_adapted_english": True,
+                    "has_reference": False,
                 },
                 {
                     "cue_index": 3,
@@ -86,9 +92,11 @@ class FakeService:
                     "japanese": f"jp {suffix} 3",
                     "literal_english": f"literal {suffix} 3",
                     "adapted_english": f"adapted {suffix} 3",
+                    "reference": "",
                     "has_japanese": True,
                     "has_literal_english": True,
                     "has_adapted_english": True,
+                    "has_reference": False,
                 },
             ]
 
@@ -150,6 +158,7 @@ class FakeService:
         japanese_text: str | None = None,
         literal_english_text: str | None = None,
         adapted_english_text: str | None = None,
+        reference_text: str | None = None,
     ) -> JobManifest:
         rows = self.preview_by_job[job_id]
         row = next(item for item in rows if int(item["cue_index"]) == cue_index)
@@ -159,6 +168,9 @@ class FakeService:
             row["literal_english"] = literal_english_text
         if adapted_english_text is not None:
             row["adapted_english"] = adapted_english_text
+        if reference_text is not None:
+            row["reference"] = reference_text
+            row["has_reference"] = True
         self.updated_line_calls.append(
             {
                 "job_id": job_id,
@@ -166,6 +178,7 @@ class FakeService:
                 "japanese_text": japanese_text,
                 "literal_english_text": literal_english_text,
                 "adapted_english_text": adapted_english_text,
+                "reference_text": reference_text,
             }
         )
         return self.manifests[job_id]
@@ -221,6 +234,7 @@ def app(app_context: tuple[SubtitleStackApp, FakeService]) -> SubtitleStackApp:
         window.line_editor_japanese_text,
         window.line_editor_literal_text,
         window.line_editor_adapted_text,
+        window.line_editor_reference_text,
     ):
         widget.configure(state="normal")
         widget.delete("1.0", "end")
@@ -356,7 +370,62 @@ def test_selecting_one_preview_line_loads_quick_editor(app: SubtitleStackApp) ->
     assert app.line_editor_japanese_text.get("1.0", "end").strip() == "jp one 2"
     assert app.line_editor_literal_text.get("1.0", "end").strip() == "literal one 2"
     assert app.line_editor_adapted_text.get("1.0", "end").strip() == "adapted one 2"
+    assert app.line_editor_reference_text.get("1.0", "end").strip() == ""
     assert not app.save_line_button.instate(("disabled",))
+
+
+def test_reference_column_appears_only_when_present(app: SubtitleStackApp) -> None:
+    select_job(app, "job-one")
+
+    assert "reference" in [role for role, _label in app.preview_visible_columns]
+    assert "reference" in app.preview_display_rows[1].cell_labels
+
+    select_job(app, "job-two")
+
+    assert "reference" not in [role for role, _label in app.preview_visible_columns]
+    assert "reference" not in app.preview_display_rows[1].cell_labels
+
+
+def test_double_click_inline_edit_updates_service_and_preview(app_context: tuple[SubtitleStackApp, FakeService]) -> None:
+    window, service = app_context
+    service.reset()
+    window.refresh()
+    select_job(window, "job-one")
+
+    window._begin_inline_edit(2, "literal_english")
+    assert window.inline_edit_widget is not None
+    window.inline_edit_widget.delete("1.0", "end")
+    window.inline_edit_widget.insert("1.0", "inline literal rewrite")
+
+    window._commit_inline_edit()
+
+    assert service.updated_line_calls[-1]["cue_index"] == 2
+    assert service.updated_line_calls[-1]["literal_english_text"] == "inline literal rewrite"
+    assert window.preview_row_data[2]["literal_english"] == "inline literal rewrite"
+    assert window.status_var.get() == "Saved changes for subtitle line 2"
+
+
+def test_global_mousewheel_routes_to_preview_when_pointer_is_over_preview(
+    app: SubtitleStackApp,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    select_job(app, "job-one")
+    preview_scrolls: list[tuple[int, str]] = []
+    outer_scrolls: list[tuple[int, str]] = []
+    monkeypatch.setattr(app.preview_display_canvas, "yview_scroll", lambda units, what: preview_scrolls.append((units, what)))
+    monkeypatch.setattr(app.scroll_canvas, "yview_scroll", lambda units, what: outer_scrolls.append((units, what)))
+    monkeypatch.setattr(app, "winfo_pointerx", lambda: 10)
+    monkeypatch.setattr(app, "winfo_pointery", lambda: 10)
+    monkeypatch.setattr(app, "winfo_containing", lambda *_args: app.preview_display_canvas)
+
+    class Event:
+        delta = -120
+        num = None
+
+    app._on_global_mousewheel(Event())
+
+    assert preview_scrolls == [(1, "units")]
+    assert outer_scrolls == []
 
 
 def test_saving_selected_line_updates_preview_and_service(app_context: tuple[SubtitleStackApp, FakeService]) -> None:
@@ -381,6 +450,7 @@ def test_saving_selected_line_updates_preview_and_service(app_context: tuple[Sub
         window.line_editor_japanese_text,
         window.line_editor_literal_text,
         window.line_editor_adapted_text,
+        window.line_editor_reference_text,
     ):
         widget.configure(state="normal")
         widget.delete("1.0", "end")
@@ -411,6 +481,7 @@ def test_saving_selected_line_updates_preview_and_service(app_context: tuple[Sub
         "japanese_text": "edited jp",
         "literal_english_text": "edited literal",
         "adapted_english_text": "edited adapted",
+        "reference_text": None,
     }
     assert window.preview_row_data[2]["japanese"] == "edited jp"
     assert window.preview_row_data[2]["literal_english"] == "edited literal"

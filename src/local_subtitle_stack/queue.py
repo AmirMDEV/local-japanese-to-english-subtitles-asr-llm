@@ -18,6 +18,8 @@ from .domain import (
     JOB_STATUS_WORKING,
     JobManifest,
     SceneContextBlock,
+    SOURCE_KIND_VIDEO,
+    TRANSLATION_SOURCE_JA,
 )
 from .utils import atomic_write_json, now_iso, read_json, safe_slug, subtitle_output_dir
 
@@ -98,6 +100,10 @@ class QueueStore:
         series: str | None = None,
         job_context: str | None = None,
         scene_contexts: list[SceneContextBlock] | None = None,
+        source_kind: str = SOURCE_KIND_VIDEO,
+        linked_video_path: Path | None = None,
+        translation_source_role: str = TRANSLATION_SOURCE_JA,
+        imported_tracks: dict[str, str] | None = None,
     ) -> JobManifest:
         if not source_path.exists():
             raise QueueError(f"Source not found: {source_path}")
@@ -119,6 +125,10 @@ class QueueStore:
             job_context=job_context,
             scene_contexts=list(scene_contexts or []),
             export_dir=str(subtitle_output_dir(source_path.resolve())),
+            source_kind=source_kind,
+            linked_video_path=str(linked_video_path.resolve()) if linked_video_path else None,
+            translation_source_role=translation_source_role,
+            imported_tracks=dict(imported_tracks or {}),
         )
         manifest.artifacts = {
             "job": manifest.job_filename(),
@@ -126,10 +136,12 @@ class QueueStore:
             "ja_srt": f"{source_path.stem}.ja.srt",
             "literal_srt": f"{source_path.stem}.en.literal.srt",
             "adapted_srt": f"{source_path.stem}.en.adapted.srt",
+            "reference_srt": f"{source_path.stem}.reference.srt",
             "audio": "source.wav",
             "ja_cues": "ja.cues.json",
             "literal_cues": "literal.cues.json",
             "adapted_cues": "adapted.cues.json",
+            "reference_cues": "reference.cues.json",
         }
         self.save_manifest(job_dir, manifest)
         return manifest

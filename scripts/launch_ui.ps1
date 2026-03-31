@@ -7,4 +7,4 @@ if (-not (Test-Path $pythonw)) {
     throw "pythonw.exe was not found at $pythonw. Set up .venv311 first."
 }
 
-Start-Process -FilePath $pythonw -ArgumentList "-m", "local_subtitle_stack.ui" -WorkingDirectory $repoRoot
+Start-Process -FilePath $pythonw -ArgumentList "-m", "local_subtitle_stack" -WorkingDirectory $repoRoot

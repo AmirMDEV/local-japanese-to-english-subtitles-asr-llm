@@ -6,12 +6,18 @@ from typing import Any
 
 from .utils import now_iso, subtitle_output_dir
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_WORKING = "working"
 JOB_STATUS_PAUSED = "paused"
 JOB_STATUS_COMPLETED = "completed"
 JOB_STATUS_FAILED = "failed"
+
+SOURCE_KIND_VIDEO = "video"
+SOURCE_KIND_SUBTITLE = "subtitle"
+
+TRANSLATION_SOURCE_JA = "ja"
+TRANSLATION_SOURCE_DIRECT_EN = "direct_en"
 
 STAGE_EXTRACT = "extract_audio"
 STAGE_TRANSCRIBE = "transcribe"
@@ -140,6 +146,10 @@ class JobManifest:
     job_context: str | None = None
     scene_contexts: list[SceneContextBlock] = field(default_factory=list)
     export_dir: str | None = None
+    source_kind: str = SOURCE_KIND_VIDEO
+    linked_video_path: str | None = None
+    translation_source_role: str = TRANSLATION_SOURCE_JA
+    imported_tracks: dict[str, str] = field(default_factory=dict)
     error: str | None = None
     models: dict[str, str] = field(default_factory=dict)
     checkpoints: dict[str, StageCheckpoint] = field(default_factory=dict)
@@ -191,6 +201,12 @@ class JobManifest:
                 for item in list(data.get("scene_contexts", []))
             ],
             export_dir=data.get("export_dir"),
+            source_kind=str(data.get("source_kind", SOURCE_KIND_VIDEO)),
+            linked_video_path=data.get("linked_video_path"),
+            translation_source_role=str(
+                data.get("translation_source_role", TRANSLATION_SOURCE_JA)
+            ),
+            imported_tracks=dict(data.get("imported_tracks", {})),
             error=data.get("error"),
             models=dict(data.get("models", {})),
             artifacts=dict(data.get("artifacts", {})),
