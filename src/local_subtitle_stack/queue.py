@@ -35,6 +35,7 @@ class QueueStore:
         self.root = config.queue_root_path
         self.lock_path = self.root / "worker.lock"
         self.pause_path = self.root / "pause.flag"
+        self._manifest_cache: dict[Path, tuple[tuple[int, int], JobManifest]] = {}
 
     @property
     def incoming_dir(self) -> Path:
@@ -104,6 +105,7 @@ class QueueStore:
         linked_video_path: Path | None = None,
         translation_source_role: str = TRANSLATION_SOURCE_JA,
         imported_tracks: dict[str, str] | None = None,
+        include_adapted_english: bool = True,
     ) -> JobManifest:
         if not source_path.exists():
             raise QueueError(f"Source not found: {source_path}")
@@ -129,6 +131,7 @@ class QueueStore:
             linked_video_path=str(linked_video_path.resolve()) if linked_video_path else None,
             translation_source_role=translation_source_role,
             imported_tracks=dict(imported_tracks or {}),
+            include_adapted_english=include_adapted_english,
         )
         manifest.artifacts = {
             "job": manifest.job_filename(),
@@ -150,9 +153,16 @@ class QueueStore:
         manifest.mark_updated()
         manifest_path = job_dir / manifest.artifacts.get("job", manifest.job_filename())
         atomic_write_json(manifest_path, manifest.to_dict())
+        self._cache_manifest(manifest_path, manifest)
 
     def load_manifest(self, job_dir: Path) -> JobManifest:
-        return JobManifest.from_dict(read_json(self._manifest_path(job_dir)))
+        manifest_path = self._manifest_path(job_dir)
+        cached = self._cached_manifest(manifest_path)
+        if cached is not None:
+            return cached
+        manifest = JobManifest.from_dict(read_json(manifest_path))
+        self._cache_manifest(manifest_path, manifest)
+        return self._clone_manifest(manifest)
 
     def list_jobs(self) -> list[tuple[Path, JobManifest, str]]:
         rows: list[tuple[Path, JobManifest, str]] = []
@@ -168,6 +178,37 @@ class QueueStore:
                 except FileNotFoundError:
                     continue
         return sorted(rows, key=lambda item: item[1].created_at)
+
+    def _manifest_signature(self, manifest_path: Path) -> tuple[int, int]:
+        stat = manifest_path.stat()
+        return stat.st_mtime_ns, stat.st_size
+
+    def _clone_manifest(self, manifest: JobManifest) -> JobManifest:
+        return JobManifest.from_dict(manifest.to_dict())
+
+    def _cache_manifest(self, manifest_path: Path, manifest: JobManifest) -> None:
+        try:
+            signature = self._manifest_signature(manifest_path)
+        except FileNotFoundError:
+            self._manifest_cache.pop(manifest_path.resolve(), None)
+            return
+        self._manifest_cache[manifest_path.resolve()] = (signature, self._clone_manifest(manifest))
+
+    def _cached_manifest(self, manifest_path: Path) -> JobManifest | None:
+        resolved = manifest_path.resolve()
+        cached = self._manifest_cache.get(resolved)
+        if cached is None:
+            return None
+        try:
+            signature = self._manifest_signature(manifest_path)
+        except FileNotFoundError:
+            self._manifest_cache.pop(resolved, None)
+            return None
+        cached_signature, cached_manifest = cached
+        if cached_signature != signature:
+            self._manifest_cache.pop(resolved, None)
+            return None
+        return self._clone_manifest(cached_manifest)
 
     def find_job(self, job_id: str) -> tuple[Path, JobManifest]:
         for job_dir, manifest, _state in self.list_jobs():

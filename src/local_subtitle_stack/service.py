@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from pathlib import Path
 
 from .config import AppConfig
 from .domain import (
     JOB_STATUS_COMPLETED,
+    JOB_STATUS_WORKING,
     STAGE_ADAPTED,
     STAGE_EXTRACT,
     STAGE_FINALIZE,
@@ -17,6 +19,7 @@ from .domain import (
     SceneContextBlock,
     SOURCE_KIND_SUBTITLE,
     SOURCE_KIND_VIDEO,
+    StageProgress,
     TRANSLATION_SOURCE_DIRECT_EN,
     TRANSLATION_SOURCE_JA,
 )
@@ -52,11 +55,29 @@ from .pipeline import (
     write_srt,
 )
 from .queue import QueueError, QueueStore
-from .utils import atomic_write_json, atomic_write_text, list_video_sources, read_json, subtitle_output_dir
+from .utils import (
+    atomic_write_json,
+    atomic_write_text,
+    elapsed_seconds_since,
+    format_duration_compact,
+    list_video_sources,
+    now_iso,
+    read_json,
+    subtitle_output_dir,
+)
 
 
 class PauseRequested(RuntimeError):
     pass
+
+
+STAGE_DISPLAY_LABELS = {
+    STAGE_EXTRACT: "Getting the audio ready",
+    STAGE_TRANSCRIBE: "Listening to the Japanese",
+    STAGE_LITERAL: "Making direct English",
+    STAGE_ADAPTED: "Making easy English",
+    STAGE_FINALIZE: "Saving the subtitle files",
+}
 
 
 class WorkerService:
@@ -73,6 +94,8 @@ class WorkerService:
         self.ffmpeg = ffmpeg
         self.subtitle_edit = subtitle_edit
         self.ollama = ollama
+        self._progress_save_cache: dict[str, tuple[float, float]] = {}
+        self._cue_cache: dict[Path, tuple[tuple[int, int], list[Cue]]] = {}
 
     def enqueue(
         self,
@@ -82,16 +105,20 @@ class WorkerService:
         series: str | None = None,
         context: str | None = None,
         scene_contexts: list[SceneContextBlock] | None = None,
+        include_adapted_english: bool = True,
     ) -> JobManifest:
         self._require_profile(profile)
-        return self.store.enqueue(
+        manifest = self.store.enqueue(
             source_path=source,
             profile=profile,
             glossary_path=glossary,
             series=series,
             job_context=context,
             scene_contexts=scene_contexts,
+            include_adapted_english=include_adapted_english,
         )
+        self._ensure_output_dir_for_manifest(manifest)
+        return manifest
 
     def enqueue_many(
         self,
@@ -101,6 +128,7 @@ class WorkerService:
         series: str | None = None,
         context: str | None = None,
         scene_contexts: list[SceneContextBlock] | None = None,
+        include_adapted_english: bool = True,
     ) -> tuple[list[JobManifest], list[Path]]:
         self._require_profile(profile)
         manifests: list[JobManifest] = []
@@ -126,6 +154,7 @@ class WorkerService:
                     series=series,
                     context=context,
                     scene_contexts=scene_contexts,
+                    include_adapted_english=include_adapted_english,
                 )
             )
         return manifests, skipped
@@ -139,6 +168,7 @@ class WorkerService:
         context: str | None = None,
         scene_contexts: list[SceneContextBlock] | None = None,
         recursive: bool = False,
+        include_adapted_english: bool = True,
     ) -> tuple[list[JobManifest], list[Path]]:
         if not folder.exists():
             raise QueueError(f"Folder not found: {folder}")
@@ -152,6 +182,7 @@ class WorkerService:
             series=series,
             context=context,
             scene_contexts=scene_contexts,
+            include_adapted_english=include_adapted_english,
         )
 
     def detect_existing_subtitles(self, video: Path) -> dict[str, Path]:
@@ -207,6 +238,7 @@ class WorkerService:
         series: str | None = None,
         context: str | None = None,
         scene_contexts: list[SceneContextBlock] | None = None,
+        include_adapted_english: bool = True,
     ) -> JobManifest:
         self._require_profile(profile)
         if bool(video) == bool(primary_subtitle):
@@ -261,6 +293,7 @@ class WorkerService:
                 linked_video_path=resolved_video,
                 translation_source_role=translation_source_role,
                 imported_tracks={role: str(path) for role, path in tracks.items()},
+                include_adapted_english=include_adapted_english,
             )
             job_dir, manifest = self.store.find_job(manifest.job_id)
         else:
@@ -270,12 +303,14 @@ class WorkerService:
             manifest.linked_video_path = str(resolved_video) if resolved_video else None
             manifest.translation_source_role = translation_source_role
             manifest.imported_tracks.update({role: str(path) for role, path in tracks.items()})
+            manifest.include_adapted_english = include_adapted_english
             if series is not None:
                 manifest.series = series
             if context is not None:
                 manifest.job_context = context
             if scene_contexts is not None:
                 manifest.scene_contexts = list(scene_contexts)
+        manifest.include_adapted_english = include_adapted_english
 
         if series is not None:
             manifest.series = series
@@ -284,6 +319,7 @@ class WorkerService:
         if scene_contexts is not None:
             manifest.scene_contexts = list(scene_contexts)
 
+        self._ensure_output_dir_for_manifest(manifest)
         self._seed_imported_tracks(job_dir, manifest, tracks)
         self._mark_imported_source_checkpoints(manifest)
         manifest.status = JOB_STATUS_COMPLETED
@@ -292,7 +328,7 @@ class WorkerService:
         self._write_review_file(review_path, manifest.review_flags)
         self._export_text_artifact(
             review_path,
-            self._output_dir_for_manifest(manifest) / manifest.artifacts["review"],
+            self._ensure_output_dir_for_manifest(manifest) / manifest.artifacts["review"],
         )
         self._save_manifest(job_dir, manifest)
         if job_dir.parent != self.store.done_dir:
@@ -302,14 +338,28 @@ class WorkerService:
     def status_rows(self) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
         for _job_dir, manifest, state in self.store.list_jobs():
+            progress = manifest.current_progress
             rows.append(
                 {
                     "job_id": manifest.job_id,
                     "state_dir": state,
                     "status": manifest.status,
                     "stage": manifest.current_stage,
+                    "step_text": self._stage_display_text(manifest),
                     "source": manifest.source_name,
                     "updated_at": manifest.updated_at,
+                    "stage_progress_percent": f"{self._current_stage_percent(manifest):.2f}",
+                    "overall_progress_percent": f"{self._overall_progress_percent(manifest):.2f}",
+                    "stage_eta_seconds": (
+                        f"{progress.eta_seconds:.2f}"
+                        if progress is not None and progress.eta_seconds is not None
+                        else ""
+                    ),
+                    "stage_progress_message": progress.message if progress is not None and progress.message else "",
+                    "source_kind": manifest.source_kind,
+                    "translation_source_role": manifest.translation_source_role,
+                    "has_reference": "true" if manifest.imported_tracks.get("reference") else "false",
+                    "include_adapted_english": "true" if manifest.include_adapted_english else "false",
                 }
             )
         return rows
@@ -382,12 +432,12 @@ class WorkerService:
             cues_path = job_dir / manifest.artifacts[cues_artifact]
             if not cues_path.exists():
                 raise QueueError(f"{label} subtitle lines are not ready yet for this job.")
-            cues = load_cues(cues_path)
+            cues = self._load_cues_cached(cues_path)
             match = next((cue for cue in cues if cue.index == cue_index), None)
             if match is None:
                 raise QueueError(f"Could not find subtitle line {cue_index} in {label}.")
             match.text = normalized
-            save_cues(cues_path, cues)
+            self._save_cues_and_cache(cues_path, cues)
             local_srt_path = job_dir / manifest.artifacts[srt_artifact]
             write_srt(local_srt_path, cues)
             if should_export:
@@ -407,11 +457,14 @@ class WorkerService:
         batch_label: str | None,
         overall_context: str | None,
         scene_contexts: list[SceneContextBlock],
+        include_adapted_english: bool | None = None,
     ) -> JobManifest:
         job_dir, manifest = self.store.find_job(job_id)
         manifest.series = batch_label or None
         manifest.job_context = overall_context or None
         manifest.scene_contexts = list(scene_contexts)
+        if include_adapted_english is not None:
+            manifest.include_adapted_english = include_adapted_english
         self._save_manifest(job_dir, manifest)
         return manifest
 
@@ -422,6 +475,7 @@ class WorkerService:
         batch_label: str | None,
         overall_context: str | None,
         scene_contexts: list[SceneContextBlock],
+        include_adapted_english: bool | None = None,
     ) -> JobManifest:
         job_dir, manifest = self.store.find_job(job_id)
         if not self._translation_source_path(job_dir, manifest).exists():
@@ -431,6 +485,8 @@ class WorkerService:
         manifest.series = batch_label or None
         manifest.job_context = overall_context or None
         manifest.scene_contexts = list(scene_contexts)
+        if include_adapted_english is not None:
+            manifest.include_adapted_english = include_adapted_english
         self._save_manifest(job_dir, manifest)
         self._rebuild_english_transactional(job_dir, manifest)
         return manifest
@@ -464,6 +520,7 @@ class WorkerService:
 
     def open_review(self, job_id: str | None = None) -> list[Path]:
         job_dir, manifest = self._resolve_target_job(job_id)
+        self._sync_existing_outputs_to_export(job_dir, manifest)
         outputs = self._review_output_paths(job_dir, manifest)
         if not outputs or not all(path.exists() for path in outputs):
             raise QueueError("Selected job does not have subtitle outputs yet.")
@@ -471,8 +528,9 @@ class WorkerService:
         return outputs
 
     def open_output_folder(self, job_id: str | None = None) -> Path:
-        _job_dir, manifest = self._resolve_target_job(job_id)
-        output_dir = self._output_dir_for_manifest(manifest)
+        job_dir, manifest = self._resolve_target_job(job_id)
+        self._sync_existing_outputs_to_export(job_dir, manifest)
+        output_dir = self._ensure_output_dir_for_manifest(manifest)
         target = output_dir if output_dir.exists() else Path(manifest.source_path).parent
         subprocess.Popen(["explorer", str(target)])
         return target
@@ -518,9 +576,191 @@ class WorkerService:
         manifest.metrics.last_seen_ram_available_mb = snapshot.free_ram_mb
         manifest.metrics.last_seen_gpu_free_mb = snapshot.gpu_free_mb
 
+    def _set_stage_progress(
+        self,
+        manifest: JobManifest,
+        *,
+        stage: str,
+        current: float,
+        total: float,
+        unit: str,
+        message: str | None = None,
+        done_seconds: float | None = None,
+        total_seconds: float | None = None,
+    ) -> None:
+        existing = manifest.current_progress
+        started_at = (
+            existing.started_at
+            if existing is not None and existing.stage == stage
+            else now_iso()
+        )
+        percent = 0.0
+        if total > 0:
+            percent = max(0.0, min((current / total) * 100.0, 100.0))
+
+        eta_seconds: float | None = None
+        elapsed = elapsed_seconds_since(started_at)
+        rate_complete = current
+        rate_total = total
+        if (
+            done_seconds is not None
+            and total_seconds is not None
+            and total_seconds > 0
+            and done_seconds > 0
+        ):
+            rate_complete = done_seconds
+            rate_total = total_seconds
+        if elapsed is not None and elapsed > 0 and rate_complete > 0 and rate_total > rate_complete:
+            rate = rate_complete / elapsed
+            if rate > 0:
+                eta_seconds = max((rate_total - rate_complete) / rate, 0.0)
+
+        manifest.current_progress = StageProgress(
+            stage=stage,
+            current=current,
+            total=total,
+            unit=unit,
+            percent=percent,
+            started_at=started_at,
+            updated_at=now_iso(),
+            eta_seconds=eta_seconds,
+            done_seconds=done_seconds,
+            total_seconds=total_seconds,
+            message=message,
+        )
+
+    def _clear_stage_progress(self, manifest: JobManifest) -> None:
+        manifest.current_progress = None
+        self._progress_save_cache.pop(manifest.job_id, None)
+
+    def _save_progress(self, job_dir: Path, manifest: JobManifest, *, force: bool = False) -> None:
+        progress = manifest.current_progress
+        if progress is None:
+            self._save_manifest(job_dir, manifest)
+            return
+        now_monotonic = time.monotonic()
+        cached = self._progress_save_cache.get(manifest.job_id)
+        should_save = force
+        if cached is None:
+            should_save = True
+        else:
+            last_percent, last_time = cached
+            if abs(progress.percent - last_percent) >= 1.0 or now_monotonic - last_time >= 1.0:
+                should_save = True
+        if not should_save:
+            return
+        self._progress_save_cache[manifest.job_id] = (progress.percent, now_monotonic)
+        self._save_manifest(job_dir, manifest)
+
+    def _current_stage_percent(self, manifest: JobManifest) -> float:
+        if manifest.status == JOB_STATUS_COMPLETED:
+            return 100.0
+        progress = manifest.current_progress
+        if progress is not None and progress.stage == manifest.current_stage:
+            return progress.percent
+        checkpoint = manifest.checkpoint(manifest.current_stage)
+        if checkpoint.status == "completed":
+            return 100.0
+        return 0.0
+
+    def _overall_progress_percent(self, manifest: JobManifest) -> float:
+        if manifest.status == JOB_STATUS_COMPLETED:
+            return 100.0
+        stages = self._active_stages(manifest)
+        completed = sum(
+            1 for stage in stages if manifest.checkpoint(stage).status == "completed"
+        )
+        current_fraction = 0.0
+        if manifest.current_stage in stages and manifest.checkpoint(manifest.current_stage).status != "completed":
+            current_fraction = self._current_stage_percent(manifest) / 100.0
+        return min(((completed + current_fraction) / len(stages)) * 100.0, 100.0)
+
+    def _stage_display_text(self, manifest: JobManifest) -> str:
+        progress = manifest.current_progress
+        base = STAGE_DISPLAY_LABELS.get(manifest.current_stage, manifest.current_stage)
+        if progress is None or progress.stage != manifest.current_stage:
+            return base
+        percent_text = f"{progress.percent:.0f}%"
+        eta_text = (
+            f" | {format_duration_compact(progress.eta_seconds)} left"
+            if progress.eta_seconds is not None and progress.percent < 100.0
+            else ""
+        )
+        message_text = f" | {progress.message}" if progress.message else ""
+        return f"{base} ({percent_text}{eta_text}{message_text})"
+
     def _save_manifest(self, job_dir: Path, manifest: JobManifest) -> None:
         self._update_metrics(manifest)
         self.store.save_manifest(job_dir, manifest)
+
+    def _cue_signature(self, path: Path) -> tuple[int, int]:
+        stat = path.stat()
+        return stat.st_mtime_ns, stat.st_size
+
+    def _clone_cues(self, cues: list[Cue]) -> list[Cue]:
+        return [Cue(index=cue.index, start=cue.start, end=cue.end, text=cue.text) for cue in cues]
+
+    def _store_cues_cache(self, path: Path, cues: list[Cue]) -> None:
+        try:
+            signature = self._cue_signature(path)
+        except FileNotFoundError:
+            self._cue_cache.pop(path.resolve(), None)
+            return
+        self._cue_cache[path.resolve()] = (signature, self._clone_cues(cues))
+
+    def _load_cues_cached(self, path: Path) -> list[Cue]:
+        resolved = path.resolve()
+        cached = self._cue_cache.get(resolved)
+        if cached is not None:
+            try:
+                signature = self._cue_signature(path)
+            except FileNotFoundError:
+                self._cue_cache.pop(resolved, None)
+            else:
+                cached_signature, cached_cues = cached
+                if cached_signature == signature:
+                    return self._clone_cues(cached_cues)
+                self._cue_cache.pop(resolved, None)
+        cues = load_cues(path)
+        self._store_cues_cache(path, cues)
+        return self._clone_cues(cues)
+
+    def _save_cues_and_cache(self, path: Path, cues: list[Cue]) -> None:
+        save_cues(path, cues)
+        self._store_cues_cache(path, cues)
+
+    def _active_stages(self, manifest: JobManifest) -> list[str]:
+        stages = [
+            STAGE_EXTRACT,
+            STAGE_TRANSCRIBE,
+            STAGE_LITERAL,
+        ]
+        if manifest.include_adapted_english:
+            stages.append(STAGE_ADAPTED)
+        stages.append(STAGE_FINALIZE)
+        return stages
+
+    def _on_extract_progress(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        info: dict[str, float | int],
+    ) -> None:
+        covered_seconds = float(info.get("covered_seconds", 0.0))
+        total_seconds = max(float(info.get("total_seconds", 0.0)), 0.0)
+        current_chunk = int(info.get("current_chunk", 0))
+        total_chunks = max(int(info.get("total_chunks", 0)), 1)
+        self._set_stage_progress(
+            manifest,
+            stage=STAGE_EXTRACT,
+            current=covered_seconds,
+            total=total_seconds or 1.0,
+            unit="seconds",
+            message=f"Audio chunk {current_chunk} of {total_chunks}",
+            done_seconds=covered_seconds,
+            total_seconds=total_seconds or None,
+        )
+        self._save_progress(job_dir, manifest)
 
     def _stage_extract(self, job_dir: Path, manifest: JobManifest) -> None:
         checkpoint = manifest.checkpoint(STAGE_EXTRACT)
@@ -534,27 +774,69 @@ class WorkerService:
                 "mode": "imported-subtitles",
                 "source_role": manifest.translation_source_role,
             }
+            self._clear_stage_progress(manifest)
             self._save_manifest(job_dir, manifest)
             return
         manifest.current_stage = STAGE_EXTRACT
         checkpoint.attempts += 1
         chunks_dir = job_dir / "chunks"
         profile = self.config.profile(manifest.profile)
+        self._set_stage_progress(
+            manifest,
+            stage=STAGE_EXTRACT,
+            current=0.0,
+            total=1.0,
+            unit="seconds",
+            message="Checking the video length",
+        )
+        self._save_progress(job_dir, manifest, force=True)
         manifest.chunk_plan = self.ffmpeg.create_chunk_plan(
             source_path=Path(manifest.source_path),
             chunks_dir=chunks_dir,
             chunk_seconds=profile.chunk_seconds,
             overlap_seconds=profile.chunk_overlap_seconds,
+            progress_callback=lambda info: self._on_extract_progress(job_dir, manifest, info),
         )
         checkpoint.status = "completed"
-        checkpoint.details = {"chunk_count": len(manifest.chunk_plan)}
+        total_seconds = max((chunk.end for chunk in manifest.chunk_plan), default=0.0)
+        checkpoint.details = {
+            "chunk_count": len(manifest.chunk_plan),
+            "total_seconds": total_seconds,
+            "mode": "lazy-chunk-extraction",
+        }
+        self._clear_stage_progress(manifest)
         self._save_manifest(job_dir, manifest)
+
+    def _on_transcribe_extract_progress(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        *,
+        chunk_index: int,
+        total_chunks: int,
+        chunk_start: float,
+        chunk_end: float,
+        local_seconds: float,
+        total_seconds: float,
+    ) -> None:
+        covered_seconds = min(chunk_start + local_seconds, chunk_end)
+        self._set_stage_progress(
+            manifest,
+            stage=STAGE_TRANSCRIBE,
+            current=covered_seconds,
+            total=total_seconds or 1.0,
+            unit="seconds",
+            message=f"Getting audio for chunk {chunk_index} of {total_chunks}",
+            done_seconds=covered_seconds,
+            total_seconds=total_seconds or None,
+        )
+        self._save_progress(job_dir, manifest)
 
     def _stage_transcribe(self, job_dir: Path, manifest: JobManifest) -> None:
         checkpoint = manifest.checkpoint(STAGE_TRANSCRIBE)
         if checkpoint.status == "completed":
             return
-        if self._translation_source_path(job_dir, manifest).exists():
+        if manifest.source_kind == SOURCE_KIND_SUBTITLE and self._translation_source_path(job_dir, manifest).exists():
             manifest.current_stage = STAGE_TRANSCRIBE
             checkpoint.attempts += 1
             checkpoint.status = "completed"
@@ -562,6 +844,7 @@ class WorkerService:
                 "mode": "imported-subtitles",
                 "source_role": manifest.translation_source_role,
             }
+            self._clear_stage_progress(manifest)
             self._save_manifest(job_dir, manifest)
             return
         self._should_pause(job_dir, manifest)
@@ -584,34 +867,97 @@ class WorkerService:
         all_chunk_cues: list[tuple[float, list[Cue]]] = []
         batch_size = profile.asr_batch_size
         try:
+            total_chunks = max(len(manifest.chunk_plan), 1)
+            total_seconds = max((chunk.end for chunk in manifest.chunk_plan), default=1.0)
+            self._set_stage_progress(
+                manifest,
+                stage=STAGE_TRANSCRIBE,
+                current=0.0,
+                total=total_seconds,
+                unit="seconds",
+                message=f"Listening to chunk 0 of {total_chunks}",
+                done_seconds=0.0,
+                total_seconds=total_seconds,
+            )
+            self._save_progress(job_dir, manifest, force=True)
             for chunk in manifest.chunk_plan:
                 self._should_pause(job_dir, manifest)
                 transcript_path = transcript_dir / f"chunk_{chunk.index:04d}.json"
                 if transcript_path.exists():
-                    local_cues = load_cues(transcript_path)
+                    local_cues = self._load_cues_cached(transcript_path)
                 else:
+                    chunk_path = Path(chunk.path)
+                    if not chunk_path.exists():
+                        self.ffmpeg.extract_chunk(
+                            source_path=Path(manifest.source_path),
+                            chunk_path=chunk_path,
+                            start=chunk.start,
+                            duration=chunk.end - chunk.start,
+                            progress_callback=lambda local_seconds, *, current_chunk=chunk.index, total_chunk_count=total_chunks, start_seconds=chunk.start, end_seconds=chunk.end, source_seconds=total_seconds: self._on_transcribe_extract_progress(
+                                job_dir,
+                                manifest,
+                                chunk_index=current_chunk,
+                                total_chunks=total_chunk_count,
+                                chunk_start=start_seconds,
+                                chunk_end=end_seconds,
+                                local_seconds=local_seconds,
+                                total_seconds=source_seconds,
+                            ),
+                        )
                     try:
-                        local_cues = asr.transcribe_chunk(Path(chunk.path), batch_size=batch_size, device=device)
+                        local_cues = asr.transcribe_chunk(chunk_path, batch_size=batch_size, device=device)
                     except RuntimeError as exc:
                         if "out of memory" in str(exc).lower() and batch_size > 1:
                             batch_size = 1
-                            local_cues = asr.transcribe_chunk(Path(chunk.path), batch_size=batch_size, device=device)
+                            local_cues = asr.transcribe_chunk(chunk_path, batch_size=batch_size, device=device)
                         else:
                             raise
-                    save_cues(transcript_path, local_cues)
+                    self._save_cues_and_cache(transcript_path, local_cues)
+                    chunk_path.unlink(missing_ok=True)
                 all_chunk_cues.append((chunk.start, local_cues))
+                partial_merged = combine_chunk_cues(all_chunk_cues)
+                partial_normalized = normalize_japanese_cues(partial_merged)
+                self._persist_partial_japanese_outputs(job_dir, manifest, partial_normalized)
                 checkpoint.details["completed_chunks"] = chunk.index
-                self._save_manifest(job_dir, manifest)
+                checkpoint.details["completed_seconds"] = chunk.end
+                self._set_stage_progress(
+                    manifest,
+                    stage=STAGE_TRANSCRIBE,
+                    current=chunk.end,
+                    total=total_seconds,
+                    unit="seconds",
+                    message=f"Listening to chunk {chunk.index} of {total_chunks}",
+                    done_seconds=chunk.end,
+                    total_seconds=total_seconds,
+                )
+                self._save_progress(job_dir, manifest)
         finally:
             asr.close()
 
         merged = combine_chunk_cues(all_chunk_cues)
         normalized = normalize_japanese_cues(merged)
-        ja_cues_path = job_dir / manifest.artifacts["ja_cues"]
-        save_cues(ja_cues_path, normalized)
-        write_srt(job_dir / manifest.artifacts["ja_srt"], normalized)
+        self._persist_partial_japanese_outputs(job_dir, manifest, normalized)
         checkpoint.status = "completed"
+        self._clear_stage_progress(manifest)
         self._save_manifest(job_dir, manifest)
+
+    def _persist_partial_japanese_outputs(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        cues: list[Cue],
+    ) -> None:
+        ja_cues_path = job_dir / manifest.artifacts["ja_cues"]
+        ja_srt_path = job_dir / manifest.artifacts["ja_srt"]
+        self._save_cues_and_cache(ja_cues_path, cues)
+        write_srt(ja_srt_path, cues)
+        checkpoint = manifest.checkpoint(STAGE_TRANSCRIBE)
+        try:
+            export_dir = self._ensure_output_dir_for_manifest(manifest)
+            self._export_text_artifact(ja_srt_path, export_dir / manifest.artifacts["ja_srt"])
+            checkpoint.details.pop("partial_export_error", None)
+        except OSError as exc:
+            checkpoint.details["partial_export_error"] = f"{type(exc).__name__}: {exc}"
 
     def _run_translation_prompt(self, model_name: str, prompt: str, expected_count: int, adapted: bool) -> list[str]:
         try:
@@ -628,6 +974,126 @@ class WorkerService:
                 temperature=0.0 if not adapted else 0.2,
             )
             return validate_translation_payload(retry_payload, expected_count=expected_count)
+
+    def _build_translation_prompt(
+        self,
+        *,
+        manifest: JobManifest,
+        group: list[Cue],
+        group_start_index: int,
+        source_cues: list[Cue],
+        literal_cues: list[Cue],
+        glossary: list[dict[str, str]],
+        metadata: str,
+        reference_cues: list[Cue],
+        adapted: bool,
+    ) -> str:
+        context_notes = build_context_notes(
+            group=group,
+            global_context=manifest.job_context,
+            scene_contexts=manifest.scene_contexts,
+            reference_cues=reference_cues,
+        )
+        if adapted:
+            literal_group = literal_cues[group_start_index : group_start_index + len(group)]
+            prev_context = source_cues[max(0, group_start_index - 2) : group_start_index]
+            next_context = source_cues[
+                group_start_index + len(group) : group_start_index + len(group) + 2
+            ]
+            return build_adapted_prompt(
+                group=group,
+                literal_group=literal_group,
+                prev_context=prev_context,
+                next_context=next_context,
+                glossary=glossary,
+                metadata=metadata,
+                context_notes=context_notes,
+                source_language=self._translation_source_language(manifest),
+            )
+        if manifest.translation_source_role == TRANSLATION_SOURCE_DIRECT_EN:
+            return build_direct_english_rewrite_prompt(
+                group=group,
+                glossary=glossary,
+                metadata=metadata,
+                context_notes=context_notes,
+            )
+        return build_literal_prompt_with_context(
+            group=group,
+            glossary=glossary,
+            metadata=metadata,
+            context_notes=context_notes,
+        )
+
+    def _translate_group_with_backoff(
+        self,
+        *,
+        manifest: JobManifest,
+        stage_name: str,
+        model_name: str,
+        group: list[Cue],
+        group_start_index: int,
+        source_cues: list[Cue],
+        literal_cues: list[Cue],
+        glossary: list[dict[str, str]],
+        metadata: str,
+        reference_cues: list[Cue],
+        adapted: bool,
+    ) -> tuple[list[str], str | None]:
+        prompt = self._build_translation_prompt(
+            manifest=manifest,
+            group=group,
+            group_start_index=group_start_index,
+            source_cues=source_cues,
+            literal_cues=literal_cues,
+            glossary=glossary,
+            metadata=metadata,
+            reference_cues=reference_cues,
+            adapted=adapted,
+        )
+        try:
+            return (
+                self._run_translation_prompt(
+                    model_name,
+                    prompt,
+                    len(group),
+                    adapted=adapted,
+                ),
+                None,
+            )
+        except Exception as exc:
+            if len(group) <= 1:
+                raise
+            midpoint = max(len(group) // 2, 1)
+            left_texts, _left_note = self._translate_group_with_backoff(
+                manifest=manifest,
+                stage_name=stage_name,
+                model_name=model_name,
+                group=group[:midpoint],
+                group_start_index=group_start_index,
+                source_cues=source_cues,
+                literal_cues=literal_cues,
+                glossary=glossary,
+                metadata=metadata,
+                reference_cues=reference_cues,
+                adapted=adapted,
+            )
+            right_texts, _right_note = self._translate_group_with_backoff(
+                manifest=manifest,
+                stage_name=stage_name,
+                model_name=model_name,
+                group=group[midpoint:],
+                group_start_index=group_start_index + midpoint,
+                source_cues=source_cues,
+                literal_cues=literal_cues,
+                glossary=glossary,
+                metadata=metadata,
+                reference_cues=reference_cues,
+                adapted=adapted,
+            )
+            return (
+                left_texts + right_texts,
+                f"Recovered by splitting a {len(group)}-cue batch after {type(exc).__name__}: {exc}",
+            )
 
     def _translate_stage(
         self,
@@ -662,8 +1128,8 @@ class WorkerService:
         final_srt_path = output_srt_path or (job_dir / manifest.artifacts[output_srt_artifact])
         partial_output_path = partial_path or (job_dir / f"{output_artifact}.partial.json")
 
-        source_cues = load_cues(source_path)
-        literal_cues = load_cues(literal_source_path) if adapted else []
+        source_cues = self._load_cues_cached(source_path)
+        literal_cues = self._load_cues_cached(literal_source_path) if adapted else []
         reference_cues = self._reference_cues_for_job(job_dir, manifest)
         glossary = load_glossary(manifest.glossary_path)
         metadata = metadata_from_manifest(manifest.source_name, manifest.series)
@@ -671,55 +1137,36 @@ class WorkerService:
         partial_rows = read_json(partial_output_path, default=[]) or []
         translated_cues = [Cue.from_dict(item) for item in partial_rows]
         start_group = int(checkpoint.details.get("completed_groups", 0))
+        total_groups = max(len(groups), 1)
+
+        self._set_stage_progress(
+            manifest,
+            stage=stage_name,
+            current=float(start_group),
+            total=float(total_groups),
+            unit="groups",
+            message=f"Subtitle group {start_group} of {total_groups}" if start_group else f"Subtitle group 0 of {total_groups}",
+        )
+        self._save_progress(job_dir, manifest, force=True)
 
         for group_index in range(start_group, len(groups)):
             self._should_pause(job_dir, manifest)
             group = groups[group_index]
-            if adapted:
-                literal_group = literal_cues[group_index * group_size : group_index * group_size + len(group)]
-                prev_context = source_cues[max(0, group_index * group_size - 2) : group_index * group_size]
-                next_context = source_cues[
-                    group_index * group_size + len(group) : group_index * group_size + len(group) + 2
-                ]
-                prompt = build_adapted_prompt(
+            try:
+                group_start_index = group_index * group_size
+                translations, recovery_note = self._translate_group_with_backoff(
+                    manifest=manifest,
+                    stage_name=stage_name,
+                    model_name=model_name,
                     group=group,
-                    literal_group=literal_group,
-                    prev_context=prev_context,
-                    next_context=next_context,
+                    group_start_index=group_start_index,
+                    source_cues=source_cues,
+                    literal_cues=literal_cues,
                     glossary=glossary,
                     metadata=metadata,
-                    context_notes=build_context_notes(
-                        group=group,
-                        global_context=manifest.job_context,
-                        scene_contexts=manifest.scene_contexts,
-                        reference_cues=reference_cues,
-                    ),
-                    source_language=self._translation_source_language(manifest),
-                )
-            else:
-                context_notes = build_context_notes(
-                    group=group,
-                    global_context=manifest.job_context,
-                    scene_contexts=manifest.scene_contexts,
                     reference_cues=reference_cues,
+                    adapted=adapted,
                 )
-                if manifest.translation_source_role == TRANSLATION_SOURCE_DIRECT_EN:
-                    prompt = build_direct_english_rewrite_prompt(
-                        group=group,
-                        glossary=glossary,
-                        metadata=metadata,
-                        context_notes=context_notes,
-                    )
-                else:
-                    prompt = build_literal_prompt_with_context(
-                        group=group,
-                        glossary=glossary,
-                        metadata=metadata,
-                        context_notes=context_notes,
-                    )
-
-            try:
-                translations = self._run_translation_prompt(model_name, prompt, len(group), adapted=adapted)
             except Exception as exc:
                 if adapted:
                     fallback = literal_cues[
@@ -737,6 +1184,15 @@ class WorkerService:
                 else:
                     raise
             else:
+                if recovery_note:
+                    manifest.review_flags.append(
+                        ReviewFlag(
+                            stage=stage_name,
+                            group_index=group_index,
+                            reason="translation-batch-retry",
+                            detail=recovery_note,
+                        )
+                    )
                 translated_cues.extend(apply_translations(group, translations))
 
             checkpoint.details["completed_groups"] = group_index + 1
@@ -747,11 +1203,31 @@ class WorkerService:
                     for cue in translated_cues
                 ],
             )
-            self._save_manifest(job_dir, manifest)
+            self._write_partial_translation_srt(
+                job_dir,
+                manifest,
+                output_srt_artifact,
+                translated_cues,
+            )
+            self._set_stage_progress(
+                manifest,
+                stage=stage_name,
+                current=float(group_index + 1),
+                total=float(total_groups),
+                unit="groups",
+                message=f"Subtitle group {group_index + 1} of {total_groups}",
+            )
+            self._save_progress(job_dir, manifest)
 
-        save_cues(final_cues_path, translated_cues)
+        self._save_cues_and_cache(final_cues_path, translated_cues)
         write_srt(final_srt_path, translated_cues)
+        self._export_text_artifact(
+            final_srt_path,
+            self._ensure_output_dir_for_manifest(manifest) / manifest.artifacts[output_srt_artifact],
+        )
+        self._remove_partial_translation_srt(job_dir, manifest, output_srt_artifact)
         checkpoint.status = "completed"
+        self._clear_stage_progress(manifest)
         self._save_manifest(job_dir, manifest)
         partial_output_path.unlink(missing_ok=True)
 
@@ -778,6 +1254,11 @@ class WorkerService:
             partial_path=partial_path,
         )
 
+    def _mark_adapted_stage_skipped(self, manifest: JobManifest) -> None:
+        checkpoint = manifest.checkpoint(STAGE_ADAPTED)
+        checkpoint.status = "completed"
+        checkpoint.details = {"mode": "skipped", "reason": "easy-english-disabled"}
+
     def _stage_translate_adapted(
         self,
         job_dir: Path,
@@ -788,6 +1269,11 @@ class WorkerService:
         output_srt_path: Path | None = None,
         partial_path: Path | None = None,
     ) -> None:
+        if not manifest.include_adapted_english:
+            self._mark_adapted_stage_skipped(manifest)
+            self._clear_stage_progress(manifest)
+            self._save_manifest(job_dir, manifest)
+            return
         self._translate_stage(
             job_dir=job_dir,
             manifest=manifest,
@@ -809,6 +1295,15 @@ class WorkerService:
             return
         manifest.current_stage = STAGE_FINALIZE
         checkpoint.attempts += 1
+        self._set_stage_progress(
+            manifest,
+            stage=STAGE_FINALIZE,
+            current=0.0,
+            total=1.0,
+            unit="steps",
+            message="Writing the final subtitle files",
+        )
+        self._save_progress(job_dir, manifest, force=True)
         review_path = job_dir / manifest.artifacts["review"]
         write_review_flags(
             review_path,
@@ -826,6 +1321,7 @@ class WorkerService:
         output_dir = self._export_final_outputs(job_dir, manifest)
         checkpoint.status = "completed"
         checkpoint.details = {"export_dir": str(output_dir)}
+        self._clear_stage_progress(manifest)
         self._save_manifest(job_dir, manifest)
 
     def _handle_stage_failure(self, job_dir: Path, manifest: JobManifest, exc: Exception) -> None:
@@ -834,6 +1330,7 @@ class WorkerService:
         if checkpoint.attempts >= 2:
             self.store.mark_failed(job_dir, manifest, detail)
             raise QueueError(detail)
+        self._clear_stage_progress(manifest)
         self.store.requeue_working(job_dir, manifest, detail)
         raise QueueError(detail)
 
@@ -876,10 +1373,10 @@ class WorkerService:
             artifact_key, srt_key = self._import_role_artifacts(role)
             local_cues_path = job_dir / manifest.artifacts[artifact_key]
             local_srt_path = job_dir / manifest.artifacts[srt_key]
-            save_cues(local_cues_path, cues)
+            self._save_cues_and_cache(local_cues_path, cues)
             write_srt(local_srt_path, cues)
             if role in {"ja", "direct", "easy"}:
-                export_dir = self._output_dir_for_manifest(manifest)
+                export_dir = self._ensure_output_dir_for_manifest(manifest)
                 self._export_text_artifact(local_srt_path, export_dir / manifest.artifacts[srt_key])
 
     def _import_role_artifacts(self, role: str) -> tuple[str, str]:
@@ -919,6 +1416,23 @@ class WorkerService:
         if manifest.export_dir:
             return Path(manifest.export_dir)
         return subtitle_output_dir(Path(manifest.source_path))
+
+    def _ensure_output_dir_for_manifest(self, manifest: JobManifest) -> Path:
+        output_dir = self._output_dir_for_manifest(manifest)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
+
+    def _sync_existing_outputs_to_export(self, job_dir: Path, manifest: JobManifest) -> Path:
+        output_dir = self._ensure_output_dir_for_manifest(manifest)
+        for artifact in ("ja_srt", "literal_srt", "adapted_srt", "review"):
+            local_path = job_dir / manifest.artifacts[artifact]
+            if local_path.exists():
+                self._export_text_artifact(local_path, output_dir / manifest.artifacts[artifact])
+        for artifact in ("literal_srt", "adapted_srt"):
+            local_partial_srt, export_partial_srt = self._partial_srt_paths(job_dir, manifest, artifact)
+            if local_partial_srt.exists():
+                self._export_text_artifact(local_partial_srt, export_partial_srt)
+        return output_dir
 
     def _review_output_paths(self, job_dir: Path, manifest: JobManifest) -> list[Path]:
         export_dir = self._output_dir_for_manifest(manifest)
@@ -965,14 +1479,17 @@ class WorkerService:
                 output_srt_path=temp_paths["literal_srt"],
                 partial_path=temp_paths["literal_partial"],
             )
-            self._stage_translate_adapted(
-                job_dir,
-                working_manifest,
-                literal_input_path=temp_paths["literal_cues"],
-                output_cues_path=temp_paths["adapted_cues"],
-                output_srt_path=temp_paths["adapted_srt"],
-                partial_path=temp_paths["adapted_partial"],
-            )
+            if working_manifest.include_adapted_english:
+                self._stage_translate_adapted(
+                    job_dir,
+                    working_manifest,
+                    literal_input_path=temp_paths["literal_cues"],
+                    output_cues_path=temp_paths["adapted_cues"],
+                    output_srt_path=temp_paths["adapted_srt"],
+                    partial_path=temp_paths["adapted_partial"],
+                )
+            else:
+                self._mark_adapted_stage_skipped(working_manifest)
 
             working_manifest.current_stage = STAGE_FINALIZE
             finalize_checkpoint = working_manifest.checkpoint(STAGE_FINALIZE)
@@ -1031,15 +1548,21 @@ class WorkerService:
         )
 
     def _promote_rebuild_outputs(self, job_dir: Path, manifest: JobManifest, temp_paths: dict[str, Path]) -> None:
-        for artifact_key in ("literal_cues", "adapted_cues", "literal_srt", "adapted_srt", "review"):
+        for artifact_key in ("literal_cues", "literal_srt", "review"):
             self._export_text_artifact(temp_paths[artifact_key], job_dir / manifest.artifacts[artifact_key])
+        if manifest.include_adapted_english:
+            for artifact_key in ("adapted_cues", "adapted_srt"):
+                if temp_paths[artifact_key].exists():
+                    self._export_text_artifact(temp_paths[artifact_key], job_dir / manifest.artifacts[artifact_key])
+        else:
+            self._remove_adapted_outputs(job_dir, manifest)
 
     def _cleanup_paths(self, paths) -> None:
         for path in paths:
             Path(path).unlink(missing_ok=True)
 
     def _export_final_outputs(self, job_dir: Path, manifest: JobManifest) -> Path:
-        output_dir = self._output_dir_for_manifest(manifest)
+        output_dir = self._ensure_output_dir_for_manifest(manifest)
         for artifact in ("ja_srt", "literal_srt", "adapted_srt", "review"):
             source_path = job_dir / manifest.artifacts[artifact]
             if not source_path.exists():
@@ -1048,11 +1571,57 @@ class WorkerService:
             self._export_text_artifact(source_path, target_path)
         return output_dir
 
+    def _partial_srt_name_for_artifact(self, manifest: JobManifest, output_srt_artifact: str) -> str:
+        filename = manifest.artifacts[output_srt_artifact]
+        path = Path(filename)
+        return f"{path.stem}.partial{path.suffix}"
+
+    def _partial_srt_paths(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        output_srt_artifact: str,
+    ) -> tuple[Path, Path]:
+        partial_name = self._partial_srt_name_for_artifact(manifest, output_srt_artifact)
+        return (
+            job_dir / partial_name,
+            self._ensure_output_dir_for_manifest(manifest) / partial_name,
+        )
+
+    def _write_partial_translation_srt(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        output_srt_artifact: str,
+        cues: list[Cue],
+    ) -> None:
+        local_partial_srt, export_partial_srt = self._partial_srt_paths(
+            job_dir,
+            manifest,
+            output_srt_artifact,
+        )
+        write_srt(local_partial_srt, cues)
+        self._export_text_artifact(local_partial_srt, export_partial_srt)
+
+    def _remove_partial_translation_srt(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        output_srt_artifact: str,
+    ) -> None:
+        local_partial_srt, export_partial_srt = self._partial_srt_paths(
+            job_dir,
+            manifest,
+            output_srt_artifact,
+        )
+        local_partial_srt.unlink(missing_ok=True)
+        export_partial_srt.unlink(missing_ok=True)
+
     def _load_optional_cues(self, job_dir: Path, manifest: JobManifest, artifact_key: str) -> list[Cue]:
         path = job_dir / manifest.artifacts[artifact_key]
         if not path.exists():
             return []
-        return load_cues(path)
+        return self._load_cues_cached(path)
 
     def _clear_translation_outputs(self, job_dir: Path, manifest: JobManifest) -> None:
         for filename in (
@@ -1060,9 +1629,22 @@ class WorkerService:
             "adapted_cues.partial.json",
         ):
             (job_dir / filename).unlink(missing_ok=True)
+        self._remove_partial_translation_srt(job_dir, manifest, "literal_srt")
+        self._remove_partial_translation_srt(job_dir, manifest, "adapted_srt")
 
         for artifact in ("literal_cues", "adapted_cues", "literal_srt", "adapted_srt", "review"):
             local_path = job_dir / manifest.artifacts[artifact]
             local_path.unlink(missing_ok=True)
+            export_path = self._output_dir_for_manifest(manifest) / manifest.artifacts[artifact]
+            export_path.unlink(missing_ok=True)
+
+    def _remove_adapted_outputs(self, job_dir: Path, manifest: JobManifest) -> None:
+        for filename in ("adapted_cues.partial.json", "adapted_cues.rebuild.partial.json"):
+            (job_dir / filename).unlink(missing_ok=True)
+        self._remove_partial_translation_srt(job_dir, manifest, "adapted_srt")
+        for artifact in ("adapted_cues", "adapted_srt"):
+            local_path = job_dir / manifest.artifacts[artifact]
+            local_path.unlink(missing_ok=True)
+            self._cue_cache.pop(local_path.resolve(), None)
             export_path = self._output_dir_for_manifest(manifest) / manifest.artifacts[artifact]
             export_path.unlink(missing_ok=True)

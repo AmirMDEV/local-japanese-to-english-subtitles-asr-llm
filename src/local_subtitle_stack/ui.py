@@ -4,16 +4,18 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .app import build_service
 from .config import CachePaths, ModelConfig, save_config
-from .domain import SceneContextBlock
+from .domain import JOB_STATUS_WORKING, SceneContextBlock
 from .guards import ResourceSnapshot, capture_snapshot
 from .queue import QueueError
 from .utils import (
+    format_duration_compact,
     format_timecode,
     no_window_creationflags,
     parse_timecode,
@@ -46,7 +48,6 @@ STAGE_LABELS = {
 PREVIEW_BASE_COLUMNS: list[tuple[str, str]] = [
     ("japanese", "Japanese"),
     ("literal_english", "Direct English"),
-    ("adapted_english", "Easy English"),
 ]
 PREVIEW_REFERENCE_COLUMN = ("reference", "Reference")
 PREVIEW_COLUMN_WRAP_CHARS = {
@@ -63,6 +64,8 @@ PREVIEW_COLUMN_MIN_WIDTH = {
     "reference": 280,
 }
 
+DONATE_URL = "https://www.paypal.com/donate/?hosted_button_id=2U2GXSKFJKJCA"
+
 
 @dataclass(slots=True)
 class ImportExistingRequest:
@@ -73,15 +76,6 @@ class ImportExistingRequest:
     direct: str = ""
     easy: str = ""
     reference: str = ""
-
-
-@dataclass(slots=True)
-class PreviewRowDisplay:
-    frame: tk.Frame
-    time_label: tk.Label
-    cell_frames: dict[str, tk.Frame]
-    cell_labels: dict[str, tk.Label]
-    inline_actions: tk.Frame | None = None
 
 
 def ordered_preview_range(item_ids: list[str], start_item: str, end_item: str) -> list[str]:
@@ -148,6 +142,7 @@ class JobEditorDraft:
     selected_cue_indexes: list[int] = field(default_factory=list)
     marked_start_cue_index: int | None = None
     marked_end_cue_index: int | None = None
+    include_adapted_english: bool = True
 
 
 class ImportExistingDialog(tk.Toplevel):
@@ -393,17 +388,14 @@ class SubtitleStackApp(tk.Tk):
         self.preview_mark_start_item: str | None = None
         self.preview_mark_end_item: str | None = None
         self.preview_selection_anchor_item: str | None = None
-        self.preview_display_rows: dict[int, PreviewRowDisplay] = {}
         self.preview_visible_columns: list[tuple[str, str]] = list(PREVIEW_BASE_COLUMNS)
-        self.inline_edit_cue_index: int | None = None
-        self.inline_edit_role: str | None = None
-        self.inline_edit_widget: tk.Text | None = None
-        self.inline_edit_buttons: tk.Frame | None = None
         self.line_editor_cue_index: int | None = None
+        self.latest_status_rows_by_id: dict[str, dict[str, str]] = {}
         self.default_model_config = ModelConfig()
         self.default_cache_paths = CachePaths()
 
         self.profile_var = tk.StringVar(value=PROFILE_LABELS.get("conservative", "Safe and steady (recommended)"))
+        self.include_adapted_english_var = tk.BooleanVar(value=True)
         self.asr_model_var = tk.StringVar(value=self.service.config.models.asr)
         self.literal_model_var = tk.StringVar(value=self.service.config.models.literal_translation)
         self.adapted_model_var = tk.StringVar(value=self.service.config.models.adapted_translation)
@@ -416,6 +408,10 @@ class SubtitleStackApp(tk.Tk):
         self.memory_var = tk.StringVar(value="RAM free: -- MB | VRAM free: -- MB")
         self.selected_file_var = tk.StringVar(value="Pick or click a job on the left.")
         self.selected_job_state_var = tk.StringVar(value="Nothing is selected yet.")
+        self.selected_stage_progress_var = tk.DoubleVar(value=0.0)
+        self.selected_overall_progress_var = tk.DoubleVar(value=0.0)
+        self.selected_stage_progress_text_var = tk.StringVar(value="This step: waiting")
+        self.selected_overall_progress_text_var = tk.StringVar(value="Whole job: 0% done")
         self.marked_range_var = tk.StringVar(value="Marked range: none")
         self.line_editor_time_var = tk.StringVar(value="")
         self.line_editor_status_var = tk.StringVar(value="Click one subtitle line to edit it here.")
@@ -437,7 +433,7 @@ class SubtitleStackApp(tk.Tk):
         style.configure("Section.TLabelframe.Label", font=("Segoe UI", 11, "bold"))
         style.configure("Hint.TLabel", foreground="#5A6470")
         style.configure("Primary.TButton", padding=(10, 6))
-        style.configure("Preview.Treeview", rowheight=68)
+        style.configure("Preview.Treeview", rowheight=82)
 
     def _build_ui(self) -> None:
         shell = ttk.Frame(self)
@@ -445,11 +441,17 @@ class SubtitleStackApp(tk.Tk):
 
         self.scroll_canvas = tk.Canvas(shell, highlightthickness=0)
         self.scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.outer_x_scrollbar = ttk.Scrollbar(shell, orient=tk.HORIZONTAL, command=self.scroll_canvas.xview)
+        self.outer_x_scrollbar.pack(side=tk.BOTTOM, fill=tk.X)
         self.outer_scrollbar = ttk.Scrollbar(shell, orient=tk.VERTICAL, command=self.scroll_canvas.yview)
         self.outer_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.scroll_canvas.configure(yscrollcommand=self.outer_scrollbar.set)
+        self.scroll_canvas.configure(
+            yscrollcommand=self.outer_scrollbar.set,
+            xscrollcommand=self.outer_x_scrollbar.set,
+        )
 
         root = ttk.Frame(self.scroll_canvas, padding=14)
+        self.scroll_root = root
         self.scroll_window = self.scroll_canvas.create_window((0, 0), window=root, anchor="nw")
         root.bind("<Configure>", self._on_content_configure)
         self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
@@ -484,6 +486,11 @@ class SubtitleStackApp(tk.Tk):
             width=28,
         )
         profile_box.pack(side=tk.LEFT, padx=(8, 16))
+        ttk.Checkbutton(
+            action_bar,
+            text="Also make easy English",
+            variable=self.include_adapted_english_var,
+        ).pack(side=tk.LEFT, padx=(0, 16))
 
         ttk.Button(action_bar, text="Add video files", command=self.enqueue_files, style="Primary.TButton").pack(
             side=tk.LEFT
@@ -508,6 +515,21 @@ class SubtitleStackApp(tk.Tk):
         self.stop_safely_button.pack(side=tk.LEFT, padx=6)
         self.retry_selected_button = ttk.Button(action_bar, text="Retry selected job", command=self.retry_selected_job)
         self.retry_selected_button.pack(side=tk.LEFT, padx=6)
+        self.donate_button = tk.Button(
+            action_bar,
+            text="Donate",
+            command=self.open_donate_page,
+            bg="#FFB300",
+            fg="#1F1A00",
+            activebackground="#FF9800",
+            activeforeground="#1F1A00",
+            relief=tk.FLAT,
+            cursor="hand2",
+            font=("Segoe UI", 10, "bold"),
+            padx=14,
+            pady=6,
+        )
+        self.donate_button.pack(side=tk.LEFT, padx=(12, 6))
 
         ttk.Label(action_bar, textvariable=self.status_var).pack(side=tk.RIGHT)
         ttk.Label(action_bar, textvariable=self.memory_var).pack(side=tk.RIGHT, padx=(0, 16))
@@ -516,7 +538,8 @@ class SubtitleStackApp(tk.Tk):
             root,
             text=(
                 "Speed mode helps your laptop stay comfortable. "
-                "Safe and steady is best when other apps are open."
+                "Safe and steady is best when other apps are open. "
+                "Turn off easy English if you only want Japanese plus direct English."
             ),
             style="Hint.TLabel",
             wraplength=1300,
@@ -671,6 +694,25 @@ class SubtitleStackApp(tk.Tk):
         ttk.Label(top, textvariable=self.selected_file_var, font=("Segoe UI", 11, "bold")).pack(anchor=tk.W)
         ttk.Label(top, textvariable=self.selected_job_state_var, style="Hint.TLabel").pack(anchor=tk.W, pady=(2, 10))
 
+        progress_frame = ttk.Frame(top)
+        progress_frame.pack(fill=tk.X, pady=(0, 10))
+        ttk.Label(progress_frame, textvariable=self.selected_stage_progress_text_var).pack(anchor=tk.W)
+        ttk.Progressbar(
+            progress_frame,
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            maximum=100.0,
+            variable=self.selected_stage_progress_var,
+        ).pack(fill=tk.X, pady=(2, 8))
+        ttk.Label(progress_frame, textvariable=self.selected_overall_progress_text_var, style="Hint.TLabel").pack(anchor=tk.W)
+        ttk.Progressbar(
+            progress_frame,
+            orient=tk.HORIZONTAL,
+            mode="determinate",
+            maximum=100.0,
+            variable=self.selected_overall_progress_var,
+        ).pack(fill=tk.X, pady=(2, 0))
+
         meta = ttk.Frame(top)
         meta.pack(fill=tk.X)
         ttk.Label(meta, text="Batch label (optional)").grid(row=0, column=0, sticky=tk.W)
@@ -731,39 +773,34 @@ class SubtitleStackApp(tk.Tk):
         self.reload_lines_button.pack(side=tk.LEFT)
 
         preview_columns = ("time", "japanese", "literal", "adapted", "reference")
+        preview_tree_frame = ttk.Frame(preview_frame, padding=(10, 0, 10, 10))
+        preview_tree_frame.pack(fill=tk.BOTH, expand=True)
         self.preview_tree = ttk.Treeview(
-            preview_frame,
+            preview_tree_frame,
             columns=preview_columns,
             show="headings",
             selectmode="extended",
-            height=1,
+            height=16,
             style="Preview.Treeview",
         )
+        self.preview_tree.heading("time", text="Time")
+        self.preview_tree.heading("japanese", text="Japanese")
+        self.preview_tree.heading("literal", text="Direct English")
+        self.preview_tree.heading("adapted", text="Easy English")
+        self.preview_tree.heading("reference", text="Reference")
+        self.preview_tree.column("time", width=170, minwidth=150, anchor=tk.W, stretch=False)
+        self.preview_tree.column("japanese", width=310, minwidth=240, anchor=tk.W)
+        self.preview_tree.column("literal", width=340, minwidth=260, anchor=tk.W)
+        self.preview_tree.column("adapted", width=340, minwidth=260, anchor=tk.W)
+        self.preview_tree.column("reference", width=300, minwidth=220, anchor=tk.W)
         self.preview_tree.bind("<<TreeviewSelect>>", self._on_preview_lines_selected)
-
-        preview_headers = tk.Frame(preview_frame, bg="#EEF2F7", padx=10, pady=6)
-        preview_headers.pack(fill=tk.X, padx=10, pady=(0, 0))
-        self.preview_header_frame = preview_headers
-
-        preview_display_frame = ttk.Frame(preview_frame, padding=(10, 0, 10, 10))
-        preview_display_frame.pack(fill=tk.BOTH, expand=True)
-        self.preview_display_canvas = tk.Canvas(preview_display_frame, highlightthickness=0, background="#F8FAFC")
-        self.preview_display_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        preview_y = ttk.Scrollbar(
-            preview_display_frame,
-            orient=tk.VERTICAL,
-            command=self.preview_display_canvas.yview,
-        )
+        self.preview_tree.bind("<Double-1>", self._on_preview_tree_double_click)
+        self.preview_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        preview_y = ttk.Scrollbar(preview_tree_frame, orient=tk.VERTICAL, command=self.preview_tree.yview)
         preview_y.pack(side=tk.RIGHT, fill=tk.Y)
-        self.preview_display_canvas.configure(yscrollcommand=preview_y.set)
-        self.preview_display_inner = tk.Frame(self.preview_display_canvas, bg="#F8FAFC")
-        self.preview_display_window = self.preview_display_canvas.create_window(
-            (0, 0),
-            window=self.preview_display_inner,
-            anchor="nw",
-        )
-        self.preview_display_inner.bind("<Configure>", self._on_preview_content_configure)
-        self.preview_display_canvas.bind("<Configure>", self._on_preview_canvas_configure)
+        preview_x = ttk.Scrollbar(preview_tree_frame, orient=tk.HORIZONTAL, command=self.preview_tree.xview)
+        preview_x.pack(side=tk.BOTTOM, fill=tk.X)
+        self.preview_tree.configure(yscrollcommand=preview_y.set, xscrollcommand=preview_x.set)
 
         line_editor_frame = ttk.LabelFrame(selected_frame, text="Quick edit selected line", style="Section.TLabelframe")
         line_editor_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 12))
@@ -789,19 +826,19 @@ class SubtitleStackApp(tk.Tk):
         ).grid(row=1, column=1, sticky=tk.W, padx=(8, 0), pady=(0, 10))
 
         ttk.Label(line_editor_inner, text="Japanese").grid(row=2, column=0, sticky=tk.NW)
-        self.line_editor_japanese_text = tk.Text(line_editor_inner, height=3, wrap="word")
+        self.line_editor_japanese_text = tk.Text(line_editor_inner, height=5, wrap="word")
         self.line_editor_japanese_text.grid(row=2, column=1, columnspan=3, sticky="nsew", padx=(8, 0))
 
         ttk.Label(line_editor_inner, text="Direct English").grid(row=3, column=0, sticky=tk.NW, pady=(8, 0))
-        self.line_editor_literal_text = tk.Text(line_editor_inner, height=3, wrap="word")
+        self.line_editor_literal_text = tk.Text(line_editor_inner, height=5, wrap="word")
         self.line_editor_literal_text.grid(row=3, column=1, columnspan=3, sticky="nsew", padx=(8, 0), pady=(8, 0))
 
         ttk.Label(line_editor_inner, text="Easy English").grid(row=4, column=0, sticky=tk.NW, pady=(8, 0))
-        self.line_editor_adapted_text = tk.Text(line_editor_inner, height=3, wrap="word")
+        self.line_editor_adapted_text = tk.Text(line_editor_inner, height=5, wrap="word")
         self.line_editor_adapted_text.grid(row=4, column=1, columnspan=3, sticky="nsew", padx=(8, 0), pady=(8, 0))
 
         ttk.Label(line_editor_inner, text="Reference").grid(row=5, column=0, sticky=tk.NW, pady=(8, 0))
-        self.line_editor_reference_text = tk.Text(line_editor_inner, height=3, wrap="word")
+        self.line_editor_reference_text = tk.Text(line_editor_inner, height=5, wrap="word")
         self.line_editor_reference_text.grid(row=5, column=1, columnspan=3, sticky="nsew", padx=(8, 0), pady=(8, 0))
 
         line_editor_buttons = ttk.Frame(line_editor_inner)
@@ -927,6 +964,7 @@ class SubtitleStackApp(tk.Tk):
                 series=self._batch_label_value(),
                 context=self._context_value(),
                 scene_contexts=self._scene_contexts_copy(),
+                include_adapted_english=self.include_adapted_english_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Add video files", str(exc))
@@ -949,6 +987,7 @@ class SubtitleStackApp(tk.Tk):
                 context=self._context_value(),
                 scene_contexts=self._scene_contexts_copy(),
                 recursive=self.recursive_var.get(),
+                include_adapted_english=self.include_adapted_english_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Add a folder", str(exc))
@@ -978,6 +1017,7 @@ class SubtitleStackApp(tk.Tk):
                 series=self._batch_label_value(),
                 context=self._context_value(),
                 scene_contexts=self._scene_contexts_copy(),
+                include_adapted_english=self.include_adapted_english_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Import existing subtitles", str(exc))
@@ -1083,6 +1123,7 @@ class SubtitleStackApp(tk.Tk):
                 batch_label=self._batch_label_value(),
                 overall_context=self._context_value(),
                 scene_contexts=self._scene_contexts_copy(),
+                include_adapted_english=self.include_adapted_english_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Save notes", str(exc))
@@ -1107,6 +1148,7 @@ class SubtitleStackApp(tk.Tk):
                 batch_label=self._batch_label_value(),
                 overall_context=self._context_value(),
                 scene_contexts=self._scene_contexts_copy(),
+                include_adapted_english=self.include_adapted_english_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Redo English", str(exc))
@@ -1144,6 +1186,17 @@ class SubtitleStackApp(tk.Tk):
             self.service.open_output_folder(selected)
         except QueueError as exc:
             messagebox.showerror("Open subtitle folder", str(exc))
+
+    def open_donate_page(self) -> None:
+        try:
+            webbrowser.open_new_tab(DONATE_URL)
+        except Exception as exc:
+            messagebox.showerror(
+                "Open donate page",
+                f"Could not open the donate page.\n\n{exc}",
+            )
+            return
+        self.status_var.set("Opened the donate page in your browser")
 
     def reload_selected_line_editor(self) -> None:
         selected = self._selected_job_id()
@@ -1385,6 +1438,12 @@ class SubtitleStackApp(tk.Tk):
         try:
             _job_dir, manifest = self.service.load_job(job_id)
             rows = self.service.preview_rows(job_id)
+            status_row = self.latest_status_rows_by_id.get(job_id)
+            if status_row is None:
+                status_row = next(
+                    (row for row in self.service.status_rows() if row["job_id"] == job_id),
+                    None,
+                )
         except QueueError as exc:
             messagebox.showerror("Load job", str(exc))
             return
@@ -1399,10 +1458,13 @@ class SubtitleStackApp(tk.Tk):
             f"{STATUS_LABELS.get(manifest.status, manifest.status)} | "
             f"{STAGE_LABELS.get(manifest.current_stage, manifest.current_stage)} | "
             f"Source: {'Video' if manifest.source_kind == 'video' else 'Subtitle-only'} | "
-            f"Translation source: {'Japanese' if manifest.translation_source_role == 'ja' else 'Imported Direct English'}"
+            f"Translation source: {'Japanese' if manifest.translation_source_role == 'ja' else 'Imported Direct English'} | "
+            f"Easy English: {'on' if manifest.include_adapted_english else 'off'}"
             + (" | Reference loaded" if manifest.imported_tracks.get('reference') else "")
         )
+        self._apply_selected_job_progress_from_row(status_row)
         self.batch_label_var.set(draft.batch_label)
+        self.include_adapted_english_var.set(draft.include_adapted_english)
         self.context_text.delete("1.0", tk.END)
         if draft.overall_context:
             self.context_text.insert("1.0", draft.overall_context)
@@ -1456,13 +1518,14 @@ class SubtitleStackApp(tk.Tk):
         rows: list[dict[str, str | float | int]],
         selected_cue_indexes: list[int] | None = None,
     ) -> None:
-        self._cancel_inline_edit()
         for item_id in self.preview_tree.get_children():
             self.preview_tree.delete(item_id)
         self.preview_ranges = {}
         self.preview_row_data = {}
         selected_item_ids: list[str] = []
         self.preview_visible_columns = list(PREVIEW_BASE_COLUMNS)
+        if any(bool(row.get("has_adapted_english")) for row in rows):
+            self.preview_visible_columns.append(("adapted_english", "Easy English"))
         if any(bool(row.get("has_reference")) for row in rows):
             self.preview_visible_columns.append(PREVIEW_REFERENCE_COLUMN)
         for row in rows:
@@ -1475,10 +1538,10 @@ class SubtitleStackApp(tk.Tk):
                 iid=item_id,
                 values=(
                     time_label,
-                    wrap_preview_text(str(row["japanese"]), 18),
-                    wrap_preview_text(str(row["literal_english"]), 28),
-                    wrap_preview_text(str(row["adapted_english"]), 32),
-                    wrap_preview_text(str(row.get("reference", "")), 28),
+                    wrap_preview_text(str(row["japanese"]), 36, max_lines=4),
+                    wrap_preview_text(str(row["literal_english"]), 40, max_lines=4),
+                    wrap_preview_text(str(row["adapted_english"]), 40, max_lines=4),
+                    wrap_preview_text(str(row.get("reference", "")), 36, max_lines=4),
                 ),
             )
             self.preview_ranges[item_id] = (float(row["start"]), float(row["end"]))
@@ -1486,9 +1549,13 @@ class SubtitleStackApp(tk.Tk):
             if selected_cue_indexes and cue_index in selected_cue_indexes:
                 selected_item_ids.append(item_id)
         self.preview_selected_cue_indexes = list(selected_cue_indexes or [])
-        self.preview_tree["displaycolumns"] = ("time", "japanese", "literal", "adapted", "reference")
+        display_columns = ["time", "japanese", "literal"]
+        if any(key == "adapted_english" for key, _label in self.preview_visible_columns):
+            display_columns.append("adapted")
+        if any(key == "reference" for key, _label in self.preview_visible_columns):
+            display_columns.append("reference")
+        self.preview_tree["displaycolumns"] = tuple(display_columns)
         if selected_item_ids:
-            self.preview_tree.update_idletasks()
             self.preview_tree.selection_remove(self.preview_tree.selection())
             for item_id in selected_item_ids:
                 self.preview_tree.selection_add(item_id)
@@ -1498,319 +1565,6 @@ class SubtitleStackApp(tk.Tk):
             self.preview_selection_anchor_item = selected_item_ids[-1]
         else:
             self.preview_selection_anchor_item = None
-        self._render_preview_display_rows()
-
-    def _clear_preview_display_rows(self) -> None:
-        self._cancel_inline_edit()
-        for child in self.preview_header_frame.winfo_children():
-            child.destroy()
-        for child in self.preview_display_inner.winfo_children():
-            child.destroy()
-        self.preview_display_rows.clear()
-
-    def _preview_column_widths(self, total_width: int | None = None) -> dict[str, int]:
-        columns = [("time", "Time"), *self.preview_visible_columns]
-        if total_width is None or total_width <= 0:
-            total_width = max(self.preview_display_canvas.winfo_width(), 1180)
-        spacing = max((len(columns) - 1) * 6, 0)
-        available_width = max(total_width - spacing, total_width)
-        widths = {key: PREVIEW_COLUMN_MIN_WIDTH.get(key, 240) for key, _label in columns}
-        min_total = sum(widths.values())
-        if available_width > min_total:
-            extra = available_width - min_total
-            growable = [key for key, _label in columns if key != "time"]
-            share = extra // max(len(growable), 1)
-            remainder = extra % max(len(growable), 1)
-            for index, key in enumerate(growable):
-                widths[key] += share + (1 if index < remainder else 0)
-        return widths
-
-    def _render_preview_headers(self) -> None:
-        for child in self.preview_header_frame.winfo_children():
-            child.destroy()
-        columns = [("time", "Time"), *self.preview_visible_columns]
-        widths = self._preview_column_widths()
-        for column_index, (key, label) in enumerate(columns):
-            header = tk.Label(
-                self.preview_header_frame,
-                text=label,
-                bg="#EEF2F7",
-                fg="#253245",
-                font=("Segoe UI", 10, "bold"),
-                padx=8,
-                pady=6,
-                anchor="w",
-            )
-            header.grid(
-                row=0,
-                column=column_index,
-                sticky="nsew",
-                padx=(0, 6 if column_index < len(columns) - 1 else 0),
-            )
-            self.preview_header_frame.grid_columnconfigure(
-                column_index,
-                weight=0 if key == "time" else 1,
-                minsize=widths[key],
-            )
-
-    def _render_preview_display_rows(self) -> None:
-        self._clear_preview_display_rows()
-        self._render_preview_headers()
-        widths = self._preview_column_widths()
-        selected_indexes = set(self.preview_selected_cue_indexes)
-        columns = list(self.preview_visible_columns)
-        for row_number, cue_index in enumerate(sorted(self.preview_row_data)):
-            row = self.preview_row_data[cue_index]
-            selected = cue_index in selected_indexes
-            row_frame = tk.Frame(
-                self.preview_display_inner,
-                bg="#DDEEFF" if selected else "#F8FAFC",
-                highlightthickness=1,
-                highlightbackground="#C9D3E1",
-                highlightcolor="#7AA2F7",
-                padx=0,
-                pady=0,
-            )
-            row_frame.pack(fill=tk.X, expand=True, pady=(0, 8))
-            row_frame.grid_columnconfigure(0, weight=0, minsize=widths["time"])
-            for column_index, (role, _label) in enumerate(columns, start=1):
-                row_frame.grid_columnconfigure(column_index, weight=1, minsize=widths[role])
-
-            time_label = tk.Label(
-                row_frame,
-                text=f"{format_timecode(float(row['start']))}\n{format_timecode(float(row['end']))}",
-                justify=tk.LEFT,
-                anchor="nw",
-                bg=row_frame.cget("bg"),
-                fg="#2C3747",
-                padx=8,
-                pady=8,
-                wraplength=max(widths["time"] - 16, 80),
-            )
-            time_label.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-
-            cell_frames: dict[str, tk.Frame] = {}
-            cell_labels: dict[str, tk.Label] = {}
-            for column_index, (role, _label) in enumerate(columns, start=1):
-                cell_frame = tk.Frame(
-                    row_frame,
-                    bg="#FFFFFF" if not selected else "#F4F9FF",
-                    highlightthickness=1,
-                    highlightbackground="#C9D3E1",
-                    highlightcolor="#7AA2F7",
-                )
-                cell_frame.grid(
-                    row=0,
-                    column=column_index,
-                    sticky="nsew",
-                    padx=(0, 6 if column_index < len(columns) else 0),
-                )
-                text_value = str(row.get(role, "")) or " "
-                label = tk.Label(
-                    cell_frame,
-                    text=text_value,
-                    justify=tk.LEFT,
-                    anchor="nw",
-                    bg=cell_frame.cget("bg"),
-                    fg="#1F2937",
-                    padx=8,
-                    pady=8,
-                    wraplength=max(widths[role] - 18, 80),
-                )
-                label.pack(fill=tk.BOTH, expand=True)
-                for widget in (cell_frame, label):
-                    widget.bind(
-                        "<Button-1>",
-                        lambda event, idx=cue_index: self._on_preview_row_click(idx, event),
-                    )
-                    widget.bind(
-                        "<Double-Button-1>",
-                        lambda event, idx=cue_index, current_role=role: self._begin_inline_edit(idx, current_role, event),
-                    )
-                cell_frames[role] = cell_frame
-                cell_labels[role] = label
-
-            time_label.bind(
-                "<Button-1>",
-                lambda event, idx=cue_index: self._on_preview_row_click(idx, event),
-            )
-            display_row = PreviewRowDisplay(
-                frame=row_frame,
-                time_label=time_label,
-                cell_frames=cell_frames,
-                cell_labels=cell_labels,
-            )
-            self.preview_display_rows[cue_index] = display_row
-            self._apply_preview_row_style(display_row, selected=selected)
-
-        self.preview_display_canvas.update_idletasks()
-        self._on_preview_content_configure(None)
-        self._refresh_preview_display_selection()
-
-    def _preview_role_is_editable(self, row: dict[str, str | float | int | bool], role: str) -> bool:
-        return bool(
-            {
-                "japanese": row.get("has_japanese"),
-                "literal_english": row.get("has_literal_english"),
-                "adapted_english": row.get("has_adapted_english"),
-                "reference": row.get("has_reference"),
-            }.get(role, False)
-        )
-
-    def _on_preview_row_click(self, cue_index: int, event: tk.Event[tk.Misc] | None = None) -> str:
-        item_id = preview_item_id(cue_index)
-        if item_id not in self.preview_tree.get_children():
-            return "break"
-
-        shift_pressed = bool(event and (event.state & 0x0001))
-        control_pressed = bool(event and (event.state & 0x0004))
-        current_selection = list(self.preview_tree.selection())
-
-        if shift_pressed and self.preview_selection_anchor_item:
-            new_selection = ordered_preview_range(
-                list(self.preview_tree.get_children()),
-                self.preview_selection_anchor_item,
-                item_id,
-            )
-            if control_pressed:
-                merged = list(dict.fromkeys([*current_selection, *new_selection]))
-                self.preview_tree.selection_set(merged)
-            else:
-                self.preview_tree.selection_set(new_selection)
-        elif control_pressed:
-            if item_id in current_selection:
-                remaining = [candidate for candidate in current_selection if candidate != item_id]
-                self.preview_tree.selection_set(remaining)
-            else:
-                self.preview_tree.selection_add(item_id)
-            self.preview_selection_anchor_item = item_id
-        else:
-            self.preview_tree.selection_set((item_id,))
-            self.preview_selection_anchor_item = item_id
-
-        self.preview_tree.focus(item_id)
-        self.preview_tree.see(item_id)
-        self._on_preview_lines_selected()
-        return "break"
-
-    def _apply_preview_row_style(self, display_row: PreviewRowDisplay, *, selected: bool) -> None:
-        row_bg = "#DDEEFF" if selected else "#F8FAFC"
-        cell_bg = "#F4F9FF" if selected else "#FFFFFF"
-        border = "#7AA2F7" if selected else "#C9D3E1"
-        display_row.frame.configure(bg=row_bg, highlightbackground=border)
-        display_row.time_label.configure(bg=row_bg)
-        for cell_frame in display_row.cell_frames.values():
-            cell_frame.configure(bg=cell_bg, highlightbackground=border)
-        for label in display_row.cell_labels.values():
-            label.configure(bg=cell_bg)
-
-    def _refresh_preview_display_selection(self) -> None:
-        selected_indexes = set(self._selected_preview_cue_indexes())
-        for cue_index, display_row in self.preview_display_rows.items():
-            self._apply_preview_row_style(display_row, selected=cue_index in selected_indexes)
-
-    def _role_update_kwargs(
-        self,
-        role: str,
-        text: str,
-    ) -> dict[str, str]:
-        mapping = {
-            "japanese": {"japanese_text": text},
-            "literal_english": {"literal_english_text": text},
-            "adapted_english": {"adapted_english_text": text},
-            "reference": {"reference_text": text},
-        }
-        return mapping[role]
-
-    def _begin_inline_edit(
-        self,
-        cue_index: int,
-        role: str,
-        event: tk.Event[tk.Misc] | None = None,
-    ) -> str:
-        self._on_preview_row_click(cue_index, event)
-        row = self.preview_row_data.get(cue_index)
-        display_row = self.preview_display_rows.get(cue_index)
-        if row is None or display_row is None or not self._preview_role_is_editable(row, role):
-            return "break"
-
-        if self.inline_edit_widget is not None:
-            self._cancel_inline_edit()
-
-        cell_frame = display_row.cell_frames[role]
-        label = display_row.cell_labels[role]
-        label.pack_forget()
-
-        editor = tk.Text(cell_frame, wrap="word", height=max(3, str(row.get(role, "")).count("\n") + 2))
-        editor.pack(fill=tk.BOTH, expand=True)
-        existing_value = str(row.get(role, ""))
-        if existing_value:
-            editor.insert("1.0", existing_value)
-        editor.focus_set()
-
-        actions = tk.Frame(display_row.frame, bg=display_row.frame.cget("bg"))
-        actions.grid(
-            row=1,
-            column=0,
-            columnspan=len(self.preview_visible_columns) + 1,
-            sticky="w",
-            pady=(4, 0),
-            padx=8,
-        )
-        save_button = ttk.Button(actions, text="Save this line", command=self._commit_inline_edit)
-        save_button.pack(side=tk.LEFT)
-        cancel_button = ttk.Button(actions, text="Cancel", command=self._cancel_inline_edit)
-        cancel_button.pack(side=tk.LEFT, padx=(6, 0))
-        editor.bind("<Control-Return>", self._commit_inline_edit)
-        editor.bind("<Escape>", self._cancel_inline_edit)
-
-        self.inline_edit_cue_index = cue_index
-        self.inline_edit_role = role
-        self.inline_edit_widget = editor
-        self.inline_edit_buttons = actions
-        return "break"
-
-    def _commit_inline_edit(self, _event: tk.Event[tk.Misc] | None = None) -> str:
-        selected = self._selected_job_id()
-        cue_index = self.inline_edit_cue_index
-        role = self.inline_edit_role
-        widget = self.inline_edit_widget
-        if not selected or cue_index is None or role is None or widget is None:
-            return "break"
-
-        text = widget.get("1.0", tk.END).strip()
-        try:
-            self.service.update_subtitle_line(
-                selected,
-                cue_index=cue_index,
-                **self._role_update_kwargs(role, text),
-            )
-        except QueueError as exc:
-            messagebox.showerror("Inline subtitle edit", str(exc))
-            return "break"
-
-        self.preview_selected_cue_indexes = [cue_index]
-        self._store_editor_draft(selected)
-        self._load_job_details(selected, force_reload=True)
-        self.status_var.set(f"Saved changes for subtitle line {cue_index}")
-        return "break"
-
-    def _cancel_inline_edit(self, _event: tk.Event[tk.Misc] | None = None) -> str:
-        if self.inline_edit_widget is not None:
-            self.inline_edit_widget.destroy()
-        if self.inline_edit_buttons is not None:
-            self.inline_edit_buttons.destroy()
-        if self.inline_edit_cue_index is not None and self.inline_edit_role is not None:
-            display_row = self.preview_display_rows.get(self.inline_edit_cue_index)
-            if display_row is not None:
-                label = display_row.cell_labels.get(self.inline_edit_role)
-                if label is not None and not label.winfo_manager():
-                    label.pack(fill=tk.BOTH, expand=True)
-        self.inline_edit_cue_index = None
-        self.inline_edit_role = None
-        self.inline_edit_widget = None
-        self.inline_edit_buttons = None
-        return "break"
 
     def _render_scene_blocks(self) -> None:
         for item_id in self.note_tree.get_children():
@@ -1838,6 +1592,7 @@ class SubtitleStackApp(tk.Tk):
                 )
                 for block in manifest.scene_contexts
             ],
+            include_adapted_english=bool(getattr(manifest, "include_adapted_english", True)),
         )
 
     def _selected_preview_cue_indexes(self) -> list[int]:
@@ -1863,6 +1618,7 @@ class SubtitleStackApp(tk.Tk):
             selected_cue_indexes=self._selected_preview_cue_indexes(),
             marked_start_cue_index=cue_index_from_item_id(self.preview_mark_start_item or ""),
             marked_end_cue_index=cue_index_from_item_id(self.preview_mark_end_item or ""),
+            include_adapted_english=self.include_adapted_english_var.get(),
         )
 
     def _update_marked_range_status(self) -> None:
@@ -2022,7 +1778,6 @@ class SubtitleStackApp(tk.Tk):
             self._clear_line_editor()
         if selection:
             self.preview_selection_anchor_item = str(selection[-1])
-        self._refresh_preview_display_selection()
         if self.preview_mark_start_item and self.preview_mark_end_item:
             self.preview_hint_var.set(
                 "The marked range is ready. Type the helper note, then press Add note."
@@ -2043,6 +1798,36 @@ class SubtitleStackApp(tk.Tk):
             self.preview_hint_var.set(
                 "Click one subtitle line to edit it, or highlight a few lines to build a helper note range."
             )
+
+    def _line_editor_widget_for_tree_column(self, column_id: str) -> tk.Text | None:
+        mapping = {
+            "#2": self.line_editor_japanese_text,
+            "#3": self.line_editor_literal_text,
+            "#4": self.line_editor_adapted_text,
+            "#5": self.line_editor_reference_text,
+        }
+        widget = mapping.get(column_id)
+        if widget is None:
+            return None
+        if str(widget.cget("state")) == tk.DISABLED:
+            return None
+        return widget
+
+    def _on_preview_tree_double_click(self, event: tk.Event[tk.Misc]) -> str:
+        item_id = self.preview_tree.identify_row(event.y)
+        if not item_id:
+            return "break"
+        self.preview_tree.focus(item_id)
+        self.preview_tree.selection_set((item_id,))
+        self._on_preview_lines_selected()
+        widget = self._line_editor_widget_for_tree_column(self.preview_tree.identify_column(event.x))
+        if widget is None:
+            widget = self.line_editor_literal_text
+            if str(widget.cget("state")) == tk.DISABLED:
+                widget = self.line_editor_japanese_text
+        if str(widget.cget("state")) != tk.DISABLED:
+            widget.focus_set()
+        return "break"
 
     def _worker_python(self) -> str:
         executable = Path(sys.executable)
@@ -2066,6 +1851,46 @@ class SubtitleStackApp(tk.Tk):
         python_executable = self._worker_python() if prefer_windowless else self._cli_python()
         return [python_executable, "-m", "local_subtitle_stack", *args]
 
+    def _float_from_row(self, row: dict[str, str], key: str) -> float:
+        value = row.get(key, "")
+        if not value:
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _stage_progress_summary_from_row(self, row: dict[str, str]) -> str:
+        stage_label = STAGE_LABELS.get(row.get("stage", ""), row.get("stage", ""))
+        percent = self._float_from_row(row, "stage_progress_percent")
+        eta_seconds = self._float_from_row(row, "stage_eta_seconds")
+        message = row.get("stage_progress_message", "").strip()
+        parts = [f"This step: {stage_label}"]
+        if percent > 0.0 or row.get("status") == "completed":
+            parts.append(f"{percent:.0f}% done")
+        if eta_seconds > 0.0 and percent < 100.0:
+            parts.append(f"about {format_duration_compact(eta_seconds)} left")
+        if message:
+            parts.append(message)
+        return " | ".join(parts)
+
+    def _overall_progress_summary_from_row(self, row: dict[str, str]) -> str:
+        percent = self._float_from_row(row, "overall_progress_percent")
+        status = STATUS_LABELS.get(row.get("status", ""), row.get("status", ""))
+        return f"Whole job: {percent:.0f}% done | {status}"
+
+    def _apply_selected_job_progress_from_row(self, row: dict[str, str] | None) -> None:
+        if row is None:
+            self.selected_stage_progress_var.set(0.0)
+            self.selected_overall_progress_var.set(0.0)
+            self.selected_stage_progress_text_var.set("This step: waiting")
+            self.selected_overall_progress_text_var.set("Whole job: 0% done")
+            return
+        self.selected_stage_progress_var.set(self._float_from_row(row, "stage_progress_percent"))
+        self.selected_overall_progress_var.set(self._float_from_row(row, "overall_progress_percent"))
+        self.selected_stage_progress_text_var.set(self._stage_progress_summary_from_row(row))
+        self.selected_overall_progress_text_var.set(self._overall_progress_summary_from_row(row))
+
     def _start_snapshot_thread(self) -> None:
         thread = threading.Thread(target=self._snapshot_loop, name="subtitle-tool-snapshot", daemon=True)
         thread.start()
@@ -2083,20 +1908,25 @@ class SubtitleStackApp(tk.Tk):
 
     def refresh(self, reschedule: bool = False) -> None:
         rows = self.service.status_rows()
+        self.latest_status_rows_by_id = {row["job_id"]: row for row in rows}
         self._sync_job_rows(rows)
-        rows_by_id = {row["job_id"]: row for row in rows}
-        selected_row = rows_by_id.get(self.current_job_id or "")
+        selected_row = self.latest_status_rows_by_id.get(self.current_job_id or "")
         if selected_row is not None:
-            self.selected_file_var.set(selected_row["source"])
+            self._apply_selected_job_progress_from_row(selected_row)
             self.selected_job_state_var.set(
                 f"{STATUS_LABELS.get(selected_row['status'], selected_row['status'])} | "
-                f"{STAGE_LABELS.get(selected_row['stage'], selected_row['stage'])}"
+                f"{STAGE_LABELS.get(selected_row['stage'], selected_row['stage'])} | "
+                f"Source: {'Video' if selected_row.get('source_kind') == 'video' else 'Subtitle-only'} | "
+                f"Translation source: {'Japanese' if selected_row.get('translation_source_role') == 'ja' else 'Imported Direct English'} | "
+                f"Easy English: {'on' if selected_row.get('include_adapted_english') == 'true' else 'off'}"
+                + (" | Reference loaded" if selected_row.get("has_reference") == "true" else "")
             )
         elif self.current_job_id is not None:
             self.current_job_id = None
             self.loaded_job_id = None
             self.selected_file_var.set("Pick or click a job on the left.")
             self.selected_job_state_var.set("Nothing is selected yet.")
+            self._apply_selected_job_progress_from_row(None)
 
         with self.snapshot_lock:
             snapshot = self.latest_snapshot
@@ -2109,8 +1939,13 @@ class SubtitleStackApp(tk.Tk):
         if self.worker_process and self.worker_process.poll() is not None:
             self.worker_process = None
 
+        working_row = next((row for row in rows if row["status"] == JOB_STATUS_WORKING), None)
         if self.rebuild_process and self.rebuild_process.poll() is None:
             self.status_var.set("Redoing the English subtitles in the background")
+        elif self.worker_process and self.worker_process.poll() is None and working_row is not None:
+            self.status_var.set(
+                f"{working_row['source']}: {self._stage_progress_summary_from_row(working_row)}"
+            )
         elif self.worker_process and self.worker_process.poll() is None:
             self.status_var.set("Processing is running in the background")
         elif self.service.store.pause_requested():
@@ -2124,7 +1959,11 @@ class SubtitleStackApp(tk.Tk):
     def _schedule_refresh(self) -> None:
         if self.refresh_job is not None:
             self.after_cancel(self.refresh_job)
-        self.refresh_job = self.after(2000, lambda: self.refresh(reschedule=True))
+        delay_ms = 1500 if (
+            (self.worker_process and self.worker_process.poll() is None)
+            or (self.rebuild_process and self.rebuild_process.poll() is None)
+        ) else 4000
+        self.refresh_job = self.after(delay_ms, lambda: self.refresh(reschedule=True))
 
     def _sync_job_rows(self, rows: list[dict[str, str]]) -> None:
         existing_ids = set(self.job_tree.get_children())
@@ -2134,7 +1973,7 @@ class SubtitleStackApp(tk.Tk):
             values = (
                 row["source"],
                 STATUS_LABELS.get(row["status"], row["status"]),
-                STAGE_LABELS.get(row["stage"], row["stage"]),
+                row.get("step_text") or STAGE_LABELS.get(row["stage"], row["stage"]),
                 row["updated_at"].replace("T", " "),
             )
             if item_id in existing_ids:
@@ -2191,37 +2030,13 @@ class SubtitleStackApp(tk.Tk):
 
     def _on_content_configure(self, _event: tk.Event[tk.Misc]) -> None:
         self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
+        requested_width = self.scroll_root.winfo_reqwidth()
+        canvas_width = self.scroll_canvas.winfo_width()
+        self.scroll_canvas.itemconfigure(self.scroll_window, width=max(canvas_width, requested_width))
 
     def _on_canvas_configure(self, event: tk.Event[tk.Misc]) -> None:
-        self.scroll_canvas.itemconfigure(self.scroll_window, width=event.width)
-
-    def _on_preview_content_configure(self, _event: tk.Event[tk.Misc] | None) -> None:
-        self.preview_display_canvas.configure(scrollregion=self.preview_display_canvas.bbox("all"))
-
-    def _on_preview_canvas_configure(self, event: tk.Event[tk.Misc] | None) -> None:
-        if event is None:
-            width = self.preview_display_canvas.winfo_width()
-        else:
-            width = event.width
-        if width <= 0:
-            return
-        self.preview_display_canvas.itemconfigure(self.preview_display_window, width=width)
-        widths = self._preview_column_widths(width)
-        columns = [("time", "Time"), *self.preview_visible_columns]
-        for column_index, (key, _label) in enumerate(columns):
-            self.preview_header_frame.grid_columnconfigure(
-                column_index,
-                weight=0 if key == "time" else 1,
-                minsize=widths[key],
-            )
-        for display_row in self.preview_display_rows.values():
-            display_row.frame.grid_columnconfigure(0, weight=0, minsize=widths["time"])
-            display_row.time_label.configure(wraplength=max(widths["time"] - 16, 80))
-            for column_index, (key, _label) in enumerate(self.preview_visible_columns, start=1):
-                display_row.frame.grid_columnconfigure(column_index, weight=1, minsize=widths[key])
-                label = display_row.cell_labels.get(key)
-                if label is not None:
-                    label.configure(wraplength=max(widths[key] - 18, 80))
+        requested_width = self.scroll_root.winfo_reqwidth()
+        self.scroll_canvas.itemconfigure(self.scroll_window, width=max(event.width, requested_width))
 
     def _widget_is_descendant(self, widget: tk.Misc | None, ancestor: tk.Misc) -> bool:
         current = widget
@@ -2248,18 +2063,24 @@ class SubtitleStackApp(tk.Tk):
             return 1
         return 0
 
+    def _shift_pressed(self, event: tk.Event[tk.Misc]) -> bool:
+        return bool(getattr(event, "state", 0) & 0x0001)
+
     def _on_global_mousewheel(self, event: tk.Event[tk.Misc]) -> str:
         units = self._mousewheel_units(event)
         if units == 0:
             return "break"
         pointer_widget = self.winfo_containing(self.winfo_pointerx(), self.winfo_pointery())
-        if pointer_widget and (
-            self._widget_is_descendant(pointer_widget, self.preview_display_canvas)
-            or self._widget_is_descendant(pointer_widget, self.preview_display_inner)
-        ):
-            self.preview_display_canvas.yview_scroll(units, "units")
+        if self._shift_pressed(event):
+            if pointer_widget and self._widget_is_descendant(pointer_widget, self.preview_tree):
+                self.preview_tree.xview_scroll(units, "units")
+            else:
+                self.scroll_canvas.xview_scroll(units, "units")
         else:
-            self.scroll_canvas.yview_scroll(units, "units")
+            if pointer_widget and self._widget_is_descendant(pointer_widget, self.preview_tree):
+                self.preview_tree.yview_scroll(units, "units")
+            else:
+                self.scroll_canvas.yview_scroll(units, "units")
         return "break"
 
     def _on_mousewheel(self, event: tk.Event[tk.Misc]) -> str:

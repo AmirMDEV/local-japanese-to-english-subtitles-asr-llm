@@ -4,7 +4,7 @@ import gc
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import requests
 
@@ -54,10 +54,12 @@ class FFmpegClient:
         chunks_dir: Path,
         chunk_seconds: int,
         overlap_seconds: int,
+        progress_callback: Callable[[dict[str, float | int]], None] | None = None,
     ) -> list[ChunkPlan]:
         chunks_dir.mkdir(parents=True, exist_ok=True)
         duration = self.probe_duration(source_path)
         step = max(chunk_seconds - overlap_seconds, 1)
+        total_chunks = self._estimate_chunk_count(duration, step)
         plans: list[ChunkPlan] = []
         index = 0
         start = 0.0
@@ -65,27 +67,104 @@ class FFmpegClient:
             index += 1
             end = min(start + chunk_seconds, duration)
             chunk_path = chunks_dir / f"chunk_{index:04d}.wav"
-            if not chunk_path.exists():
-                run_command(
-                    [
-                        self.ffmpeg_path,
-                        "-y",
-                        "-ss",
-                        f"{start:.3f}",
-                        "-t",
-                        f"{end - start:.3f}",
-                        "-i",
-                        str(source_path),
-                        "-ac",
-                        "1",
-                        "-ar",
-                        "16000",
-                        str(chunk_path),
-                    ]
-                )
             plans.append(ChunkPlan(index=index, start=start, end=end, path=str(chunk_path)))
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "current_chunk": index,
+                        "total_chunks": total_chunks,
+                        "covered_seconds": end,
+                        "total_seconds": duration,
+                    }
+                )
             start += step
         return plans
+
+    def _estimate_chunk_count(self, duration: float, step: int) -> int:
+        count = 0
+        current = 0.0
+        while current < duration - 0.05:
+            count += 1
+            current += step
+        return max(count, 1)
+
+    def extract_chunk(
+        self,
+        *,
+        source_path: Path,
+        chunk_path: Path,
+        start: float,
+        duration: float,
+        progress_callback: Callable[[float], None] | None = None,
+    ) -> None:
+        args = [
+            self.ffmpeg_path,
+            "-y",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(source_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            str(chunk_path),
+        ]
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            creationflags=no_window_creationflags(),
+        )
+        latest_progress = 0.0
+        try:
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                line = raw_line.strip()
+                if not line or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                if key == "out_time":
+                    latest_progress = min(self._parse_ffmpeg_timecode(value), duration)
+                    if progress_callback is not None:
+                        progress_callback(latest_progress)
+                elif key in {"out_time_ms", "out_time_us"}:
+                    latest_progress = min(self._parse_ffmpeg_progress_value(value), duration)
+                    if progress_callback is not None:
+                        progress_callback(latest_progress)
+                elif key == "progress" and value == "end":
+                    latest_progress = duration
+                    if progress_callback is not None:
+                        progress_callback(duration)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+        return_code = process.wait()
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, args)
+
+    def _parse_ffmpeg_timecode(self, value: str) -> float:
+        parts = value.strip().split(":")
+        if len(parts) != 3:
+            return 0.0
+        hours = int(parts[0])
+        minutes = int(parts[1])
+        seconds = float(parts[2])
+        return hours * 3600 + minutes * 60 + seconds
+
+    def _parse_ffmpeg_progress_value(self, value: str) -> float:
+        raw_value = max(float(value.strip() or 0.0), 0.0)
+        if raw_value >= 10_000_000:
+            return raw_value / 1_000_000
+        if raw_value >= 10_000:
+            return raw_value / 1000
+        return raw_value
 
 
 class TransformersASRClient:
@@ -166,8 +245,9 @@ class TransformersASRClient:
 
 
 class OllamaClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:11434") -> None:
+    def __init__(self, base_url: str = "http://127.0.0.1:11434", keep_alive: str = "5m") -> None:
         self.base_url = base_url.rstrip("/")
+        self.keep_alive = keep_alive
 
     def list_models(self) -> list[str]:
         response = requests.get(f"{self.base_url}/api/tags", timeout=30)
@@ -183,7 +263,7 @@ class OllamaClient:
                 "prompt": prompt,
                 "stream": False,
                 "format": "json",
-                "keep_alive": "0s",
+                "keep_alive": self.keep_alive,
                 "options": {"temperature": temperature},
             },
             timeout=180,

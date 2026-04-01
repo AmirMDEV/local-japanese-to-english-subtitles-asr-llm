@@ -6,7 +6,7 @@ import pytest
 
 from local_subtitle_stack.config import AppConfig
 from local_subtitle_stack.domain import JobManifest, SceneContextBlock
-from local_subtitle_stack.ui import SubtitleStackApp, ordered_preview_range, wrap_preview_text
+from local_subtitle_stack.ui import DONATE_URL, SubtitleStackApp, ordered_preview_range, wrap_preview_text
 
 
 class FakeStore:
@@ -42,6 +42,7 @@ class FakeService:
                 status="completed",
                 current_stage="finalize",
                 export_dir=str(Path(f"C:/videos/{filename} subtitles")),
+                include_adapted_english=(suffix == "one"),
             )
             manifest.artifacts = {
                 "job": f"{Path(filename).stem}.job.json",
@@ -65,11 +66,11 @@ class FakeService:
                     "end": 1.2,
                     "japanese": f"jp {suffix} 1",
                     "literal_english": f"literal {suffix} 1",
-                    "adapted_english": f"adapted {suffix} 1",
+                    "adapted_english": f"adapted {suffix} 1" if suffix == "one" else "",
                     "reference": f"reference {suffix} 1" if suffix == "one" else "",
                     "has_japanese": True,
                     "has_literal_english": True,
-                    "has_adapted_english": True,
+                    "has_adapted_english": suffix == "one",
                     "has_reference": suffix == "one",
                 },
                 {
@@ -78,11 +79,11 @@ class FakeService:
                     "end": 2.8,
                     "japanese": f"jp {suffix} 2",
                     "literal_english": f"literal {suffix} 2",
-                    "adapted_english": f"adapted {suffix} 2",
+                    "adapted_english": f"adapted {suffix} 2" if suffix == "one" else "",
                     "reference": "",
                     "has_japanese": True,
                     "has_literal_english": True,
-                    "has_adapted_english": True,
+                    "has_adapted_english": suffix == "one",
                     "has_reference": False,
                 },
                 {
@@ -91,11 +92,11 @@ class FakeService:
                     "end": 4.0,
                     "japanese": f"jp {suffix} 3",
                     "literal_english": f"literal {suffix} 3",
-                    "adapted_english": f"adapted {suffix} 3",
+                    "adapted_english": f"adapted {suffix} 3" if suffix == "one" else "",
                     "reference": "",
                     "has_japanese": True,
                     "has_literal_english": True,
-                    "has_adapted_english": True,
+                    "has_adapted_english": suffix == "one",
                     "has_reference": False,
                 },
             ]
@@ -105,10 +106,19 @@ class FakeService:
             {
                 "job_id": job_id,
                 "state_dir": "done",
-                "status": manifest.status,
-                "stage": manifest.current_stage,
+                "status": "working" if job_id == "job-one" else manifest.status,
+                "stage": "transcribe" if job_id == "job-one" else manifest.current_stage,
+                "step_text": "Listening to the Japanese | 50% done | about 5m left | Audio chunk 1 of 2" if job_id == "job-one" else "Saving the subtitle files",
                 "source": manifest.source_name,
                 "updated_at": manifest.updated_at,
+                "stage_progress_percent": "50.00" if job_id == "job-one" else "100.00",
+                "overall_progress_percent": "72.00" if job_id == "job-one" else "100.00",
+                "stage_eta_seconds": "300.00" if job_id == "job-one" else "",
+                "stage_progress_message": "Audio chunk 1 of 2" if job_id == "job-one" else "",
+                "source_kind": "video",
+                "translation_source_role": "ja",
+                "has_reference": "true" if job_id == "job-one" else "false",
+                "include_adapted_english": "true" if manifest.include_adapted_english else "false",
             }
             for job_id, manifest in self.manifests.items()
         ]
@@ -126,17 +136,21 @@ class FakeService:
         batch_label: str | None,
         overall_context: str | None,
         scene_contexts: list[SceneContextBlock],
+        include_adapted_english: bool | None = None,
     ) -> JobManifest:
         manifest = self.manifests[job_id]
         manifest.series = batch_label or None
         manifest.job_context = overall_context or None
         manifest.scene_contexts = list(scene_contexts)
+        if include_adapted_english is not None:
+            manifest.include_adapted_english = include_adapted_english
         self.saved_notes_calls.append(
             {
                 "job_id": job_id,
                 "batch_label": batch_label,
                 "overall_context": overall_context,
                 "scene_contexts": list(scene_contexts),
+                "include_adapted_english": include_adapted_english,
             }
         )
         return manifest
@@ -217,11 +231,16 @@ def app(app_context: tuple[SubtitleStackApp, FakeService]) -> SubtitleStackApp:
     window.preview_mark_end_item = None
     window.line_editor_cue_index = None
     window.batch_label_var.set("")
+    window.include_adapted_english_var.set(True)
     window.note_start_var.set("")
     window.note_end_var.set("")
     window.status_var.set("Ready")
     window.selected_file_var.set("Pick or click a job on the left.")
     window.selected_job_state_var.set("Nothing is selected yet.")
+    window.selected_stage_progress_var.set(0.0)
+    window.selected_overall_progress_var.set(0.0)
+    window.selected_stage_progress_text_var.set("This step: waiting")
+    window.selected_overall_progress_text_var.set("Whole job: 0% done")
     window.marked_range_var.set("Marked range: none")
     window.preview_hint_var.set(
         "When you click a job, its Japanese lines and English lines show up here."
@@ -291,6 +310,18 @@ def test_refresh_keeps_preview_selection_for_current_job(app: SubtitleStackApp) 
     assert app.current_job_id == "job-one"
     assert app.loaded_job_id == "job-one"
     assert app.preview_tree.selection() == ("cue-2",)
+
+
+def test_refresh_updates_selected_progress_bars_and_text(app: SubtitleStackApp) -> None:
+    select_job(app, "job-one")
+
+    app.refresh()
+
+    assert app.selected_stage_progress_var.get() == pytest.approx(50.0)
+    assert app.selected_overall_progress_var.get() == pytest.approx(72.0)
+    assert "Listening to the Japanese" in app.selected_stage_progress_text_var.get()
+    assert "about 5m left" in app.selected_stage_progress_text_var.get()
+    assert "Whole job: 72% done" in app.selected_overall_progress_text_var.get()
 
 
 def test_marked_range_survives_refresh_cycles(app: SubtitleStackApp) -> None:
@@ -378,31 +409,56 @@ def test_reference_column_appears_only_when_present(app: SubtitleStackApp) -> No
     select_job(app, "job-one")
 
     assert "reference" in [role for role, _label in app.preview_visible_columns]
-    assert "reference" in app.preview_display_rows[1].cell_labels
+    assert "reference" in app.preview_tree["displaycolumns"]
 
     select_job(app, "job-two")
 
     assert "reference" not in [role for role, _label in app.preview_visible_columns]
-    assert "reference" not in app.preview_display_rows[1].cell_labels
+    assert "reference" not in app.preview_tree["displaycolumns"]
 
 
-def test_double_click_inline_edit_updates_service_and_preview(app_context: tuple[SubtitleStackApp, FakeService]) -> None:
+def test_easy_english_column_and_checkbox_follow_selected_job(app: SubtitleStackApp) -> None:
+    select_job(app, "job-one")
+
+    assert "adapted_english" in [role for role, _label in app.preview_visible_columns]
+    assert "adapted" in app.preview_tree["displaycolumns"]
+    assert app.include_adapted_english_var.get() is True
+
+    select_job(app, "job-two")
+
+    assert "adapted_english" not in [role for role, _label in app.preview_visible_columns]
+    assert "adapted" not in app.preview_tree["displaycolumns"]
+    assert app.include_adapted_english_var.get() is False
+
+
+def test_double_click_preview_focuses_matching_editor(app_context: tuple[SubtitleStackApp, FakeService]) -> None:
     window, service = app_context
     service.reset()
     window.refresh()
     select_job(window, "job-one")
+    focus_calls: list[str] = []
+    original_focus_set = window.line_editor_literal_text.focus_set
 
-    window._begin_inline_edit(2, "literal_english")
-    assert window.inline_edit_widget is not None
-    window.inline_edit_widget.delete("1.0", "end")
-    window.inline_edit_widget.insert("1.0", "inline literal rewrite")
+    def record_focus() -> None:
+        focus_calls.append("literal")
+        original_focus_set()
 
-    window._commit_inline_edit()
+    window.line_editor_literal_text.focus_set = record_focus  # type: ignore[method-assign]
 
-    assert service.updated_line_calls[-1]["cue_index"] == 2
-    assert service.updated_line_calls[-1]["literal_english_text"] == "inline literal rewrite"
-    assert window.preview_row_data[2]["literal_english"] == "inline literal rewrite"
-    assert window.status_var.get() == "Saved changes for subtitle line 2"
+    class Event:
+        x = 260
+        y = 42
+
+    window.preview_tree.selection_set(("cue-2",))
+    window.preview_tree.focus("cue-2")
+    window.preview_tree.identify_row = lambda _y: "cue-2"  # type: ignore[method-assign]
+    window.preview_tree.identify_column = lambda _x: "#3"  # type: ignore[method-assign]
+
+    result = window._on_preview_tree_double_click(Event())
+
+    assert result == "break"
+    assert window.line_editor_cue_index == 2
+    assert focus_calls == ["literal"]
 
 
 def test_global_mousewheel_routes_to_preview_when_pointer_is_over_preview(
@@ -412,11 +468,11 @@ def test_global_mousewheel_routes_to_preview_when_pointer_is_over_preview(
     select_job(app, "job-one")
     preview_scrolls: list[tuple[int, str]] = []
     outer_scrolls: list[tuple[int, str]] = []
-    monkeypatch.setattr(app.preview_display_canvas, "yview_scroll", lambda units, what: preview_scrolls.append((units, what)))
+    monkeypatch.setattr(app.preview_tree, "yview_scroll", lambda units, what: preview_scrolls.append((units, what)))
     monkeypatch.setattr(app.scroll_canvas, "yview_scroll", lambda units, what: outer_scrolls.append((units, what)))
     monkeypatch.setattr(app, "winfo_pointerx", lambda: 10)
     monkeypatch.setattr(app, "winfo_pointery", lambda: 10)
-    monkeypatch.setattr(app, "winfo_containing", lambda *_args: app.preview_display_canvas)
+    monkeypatch.setattr(app, "winfo_containing", lambda *_args: app.preview_tree)
 
     class Event:
         delta = -120
@@ -426,6 +482,45 @@ def test_global_mousewheel_routes_to_preview_when_pointer_is_over_preview(
 
     assert preview_scrolls == [(1, "units")]
     assert outer_scrolls == []
+
+
+def test_shift_mousewheel_routes_horizontally_to_outer_canvas(
+    app: SubtitleStackApp,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outer_x_scrolls: list[tuple[int, str]] = []
+    outer_y_scrolls: list[tuple[int, str]] = []
+    monkeypatch.setattr(app.scroll_canvas, "xview_scroll", lambda units, what: outer_x_scrolls.append((units, what)))
+    monkeypatch.setattr(app.scroll_canvas, "yview_scroll", lambda units, what: outer_y_scrolls.append((units, what)))
+    monkeypatch.setattr(app, "winfo_pointerx", lambda: 10)
+    monkeypatch.setattr(app, "winfo_pointery", lambda: 10)
+    monkeypatch.setattr(app, "winfo_containing", lambda *_args: app.scroll_root)
+
+    class Event:
+        delta = -120
+        num = None
+        state = 0x0001
+
+    app._on_global_mousewheel(Event())
+
+    assert outer_x_scrolls == [(1, "units")]
+    assert outer_y_scrolls == []
+
+
+def test_canvas_configure_keeps_requested_width_when_content_is_wider(
+    app: SubtitleStackApp,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured: list[tuple[object, int]] = []
+    monkeypatch.setattr(app.scroll_root, "winfo_reqwidth", lambda: 1600)
+    monkeypatch.setattr(app.scroll_canvas, "itemconfigure", lambda item, **kwargs: configured.append((item, kwargs["width"])))
+
+    class Event:
+        width = 900
+
+    app._on_canvas_configure(Event())
+
+    assert configured == [(app.scroll_window, 1600)]
 
 
 def test_saving_selected_line_updates_preview_and_service(app_context: tuple[SubtitleStackApp, FakeService]) -> None:
@@ -441,6 +536,7 @@ def test_saving_selected_line_updates_preview_and_service(app_context: tuple[Sub
     window.preview_mark_end_item = None
     window.line_editor_cue_index = None
     window.batch_label_var.set("")
+    window.include_adapted_english_var.set(True)
     window.note_start_var.set("")
     window.note_end_var.set("")
     window.status_var.set("Ready")
@@ -519,6 +615,7 @@ def test_redo_english_launches_background_process_and_disables_conflicting_butto
     assert app.rebuild_process is fake_process
     assert app.rebuild_job_id == "job-one"
     assert app.service.saved_notes_calls[-1]["overall_context"] == "Use this saved note."
+    assert app.service.saved_notes_calls[-1]["include_adapted_english"] is True
     assert app.start_processing_button.instate(("disabled",))
     assert app.retry_selected_button.instate(("disabled",))
     assert app.save_notes_button.instate(("disabled",))
@@ -533,3 +630,16 @@ def test_redo_english_launches_background_process_and_disables_conflicting_butto
     assert not app.start_processing_button.instate(("disabled",))
     assert not app.redo_english_button.instate(("disabled",))
     assert app.status_var.get() == "English subtitles were rebuilt for the selected job"
+
+
+def test_open_donate_page_opens_browser_and_updates_status(
+    app: SubtitleStackApp,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr("local_subtitle_stack.ui.webbrowser.open_new_tab", lambda url: opened.append(url))
+
+    app.open_donate_page()
+
+    assert opened == [DONATE_URL]
+    assert app.status_var.get() == "Opened the donate page in your browser"

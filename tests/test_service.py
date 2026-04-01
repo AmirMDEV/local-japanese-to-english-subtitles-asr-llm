@@ -9,7 +9,11 @@ from local_subtitle_stack.config import AppConfig, CachePaths, ModelConfig, Tool
 from local_subtitle_stack.domain import (
     ChunkPlan,
     Cue,
+    JOB_STATUS_WORKING,
     SceneContextBlock,
+    StageProgress,
+    STAGE_ADAPTED,
+    STAGE_EXTRACT,
     SOURCE_KIND_SUBTITLE,
     SOURCE_KIND_VIDEO,
     TRANSLATION_SOURCE_DIRECT_EN,
@@ -19,14 +23,64 @@ from local_subtitle_stack.guards import ResourceSnapshot
 from local_subtitle_stack.integrations import SubtitleEditClient
 from local_subtitle_stack.queue import QueueError, QueueStore
 from local_subtitle_stack.service import WorkerService
+from local_subtitle_stack.utils import subtitle_output_dir
 
 
 class FakeFFmpeg:
-    def create_chunk_plan(self, source_path: Path, chunks_dir: Path, chunk_seconds: int, overlap_seconds: int) -> list[ChunkPlan]:
+    def __init__(self) -> None:
+        self.extract_calls: list[dict[str, float | str]] = []
+
+    def create_chunk_plan(
+        self,
+        source_path: Path,
+        chunks_dir: Path,
+        chunk_seconds: int,
+        overlap_seconds: int,
+        progress_callback=None,
+    ) -> list[ChunkPlan]:
         chunks_dir.mkdir(parents=True, exist_ok=True)
         chunk_path = chunks_dir / "chunk_0001.wav"
-        chunk_path.write_text("chunk", encoding="utf-8")
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "current_chunk": 1,
+                    "total_chunks": 1,
+                    "covered_seconds": 6.0,
+                    "total_seconds": 12.0,
+                }
+            )
+            progress_callback(
+                {
+                    "current_chunk": 1,
+                    "total_chunks": 1,
+                    "covered_seconds": 12.0,
+                    "total_seconds": 12.0,
+                }
+            )
         return [ChunkPlan(index=1, start=0.0, end=12.0, path=str(chunk_path))]
+
+    def extract_chunk(
+        self,
+        *,
+        source_path: Path,
+        chunk_path: Path,
+        start: float,
+        duration: float,
+        progress_callback=None,
+    ) -> None:
+        self.extract_calls.append(
+            {
+                "source_path": str(source_path),
+                "chunk_path": str(chunk_path),
+                "start": start,
+                "duration": duration,
+            }
+        )
+        chunk_path.parent.mkdir(parents=True, exist_ok=True)
+        chunk_path.write_text("chunk", encoding="utf-8")
+        if progress_callback is not None:
+            progress_callback(duration / 2)
+            progress_callback(duration)
 
 
 class FakeSubtitleEdit(SubtitleEditClient):
@@ -50,6 +104,15 @@ class FakeASR:
 
     def close(self) -> None:
         return None
+
+
+class FailOnSecondChunkASR(FakeASR):
+    def transcribe_chunk(self, chunk_path: Path, batch_size: int, device: str) -> list[Cue]:
+        if "0002" in chunk_path.stem:
+            raise RuntimeError("synthetic transcription failure")
+        return [
+            Cue(index=1, start=0.0, end=1.2, text="partial first chunk"),
+        ]
 
 
 class SuccessfulOllama:
@@ -112,6 +175,28 @@ class RetryableJsonOllama(SuccessfulOllama):
         return super().generate_json(model, prompt, temperature)
 
 
+class SplitRecoveringOllama(SuccessfulOllama):
+    def generate_json(self, model: str, prompt: str, temperature: float) -> dict[str, list[str]]:
+        count = prompt.count('"index":')
+        if count > 1:
+            prefix = "adapted" if '"literal_en"' in prompt else "literal"
+            return {"translations": [f"{prefix} split line {index + 1}" for index in range(count - 1)]}
+        return super().generate_json(model, prompt, temperature)
+
+
+class FailOnSecondLiteralGroupOllama(SuccessfulOllama):
+    def __init__(self) -> None:
+        super().__init__()
+        self.literal_group_calls = 0
+
+    def generate_json(self, model: str, prompt: str, temperature: float) -> dict[str, list[str]]:
+        if '"literal_en"' not in prompt:
+            self.literal_group_calls += 1
+            if self.literal_group_calls == 2:
+                raise RuntimeError("literal group 2 failed")
+        return super().generate_json(model, prompt, temperature)
+
+
 def build_config(tmp_path: Path) -> AppConfig:
     return AppConfig(
         config_path=str(tmp_path / "config.toml"),
@@ -146,6 +231,40 @@ def build_service(tmp_path: Path, ollama: SuccessfulOllama) -> WorkerService:
     )
 
 
+class TwoChunkFFmpeg(FakeFFmpeg):
+    def create_chunk_plan(
+        self,
+        source_path: Path,
+        chunks_dir: Path,
+        chunk_seconds: int,
+        overlap_seconds: int,
+        progress_callback=None,
+    ) -> list[ChunkPlan]:
+        chunks_dir.mkdir(parents=True, exist_ok=True)
+        plans = [
+            ChunkPlan(index=1, start=0.0, end=12.0, path=str(chunks_dir / "chunk_0001.wav")),
+            ChunkPlan(index=2, start=12.0, end=24.0, path=str(chunks_dir / "chunk_0002.wav")),
+        ]
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "current_chunk": 1,
+                    "total_chunks": 2,
+                    "covered_seconds": 12.0,
+                    "total_seconds": 24.0,
+                }
+            )
+            progress_callback(
+                {
+                    "current_chunk": 2,
+                    "total_chunks": 2,
+                    "covered_seconds": 24.0,
+                    "total_seconds": 24.0,
+                }
+            )
+        return plans
+
+
 def write_srt_fixture(path: Path, entries: list[tuple[str, str, str]]) -> None:
     blocks: list[str] = []
     for index, (start, end, text) in enumerate(entries, start=1):
@@ -174,6 +293,100 @@ def test_worker_creates_local_and_exported_outputs(monkeypatch: pytest.MonkeyPat
     assert (output_dir / loaded.artifacts["literal_srt"]).exists()
     assert (output_dir / loaded.artifacts["adapted_srt"]).exists()
     assert (output_dir / loaded.artifacts["review"]).exists()
+    assert not (output_dir / "scene.en.literal.partial.srt").exists()
+    assert not (output_dir / "scene.en.adapted.partial.srt").exists()
+
+
+def test_enqueue_creates_source_side_output_folder(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "queued-scene.mp4"
+    source.write_text("video", encoding="utf-8")
+
+    manifest = service.enqueue(source, profile="default")
+
+    assert Path(manifest.export_dir).exists()
+
+
+def test_transcribe_extracts_audio_chunks_on_demand_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "lazy-audio.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+
+    service.run_until_empty()
+
+    _job_dir, loaded = service.store.find_job(manifest.job_id)
+    assert isinstance(service.ffmpeg, FakeFFmpeg)
+    assert len(service.ffmpeg.extract_calls) == 1
+    assert loaded.chunk_plan
+    chunk_path = Path(loaded.chunk_plan[0].path)
+    assert not chunk_path.exists()
+
+
+def test_partial_japanese_srt_survives_when_transcription_fails_midway(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    monkeypatch.setattr("local_subtitle_stack.service.TransformersASRClient", FailOnSecondChunkASR)
+    service = build_service(tmp_path, SuccessfulOllama())
+    service.ffmpeg = TwoChunkFFmpeg()
+    source = tmp_path / "partial-ja.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+
+    service.run_until_empty()
+
+    job_dir, loaded = service.store.find_job(manifest.job_id)
+    export_dir = Path(loaded.export_dir)
+    local_ja = job_dir / loaded.artifacts["ja_srt"]
+    export_ja = export_dir / loaded.artifacts["ja_srt"]
+
+    assert job_dir.parent.name == "failed"
+    assert local_ja.exists()
+    assert export_ja.exists()
+    assert "partial first chunk" in local_ja.read_text(encoding="utf-8")
+    assert "partial first chunk" in export_ja.read_text(encoding="utf-8")
+
+
+def test_job_can_skip_easy_english_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "no-easy.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default", include_adapted_english=False)
+
+    service.run_until_empty()
+
+    job_dir, loaded = service.store.find_job(manifest.job_id)
+    export_dir = Path(loaded.export_dir)
+    preview = service.preview_rows(manifest.job_id)
+
+    assert loaded.include_adapted_english is False
+    assert loaded.checkpoint(STAGE_ADAPTED).status == "completed"
+    assert loaded.checkpoint(STAGE_ADAPTED).details["mode"] == "skipped"
+    assert (job_dir / loaded.artifacts["ja_srt"]).exists()
+    assert (job_dir / loaded.artifacts["literal_srt"]).exists()
+    assert not (job_dir / loaded.artifacts["adapted_srt"]).exists()
+    assert (export_dir / loaded.artifacts["ja_srt"]).exists()
+    assert (export_dir / loaded.artifacts["literal_srt"]).exists()
+    assert not (export_dir / loaded.artifacts["adapted_srt"]).exists()
+    assert all(row["adapted_english"] == "" for row in preview)
+    assert service.open_review(manifest.job_id) == [
+        export_dir / loaded.artifacts["ja_srt"],
+        export_dir / loaded.artifacts["literal_srt"],
+    ]
 
 
 def test_open_review_prefers_exported_outputs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -193,6 +406,76 @@ def test_open_review_prefers_exported_outputs(monkeypatch: pytest.MonkeyPatch, t
         output_dir / "review.en.adapted.srt",
     ]
     assert service.subtitle_edit.opened == paths
+
+
+def test_finished_subtitles_are_exported_beside_source_even_if_finalize_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "finalize-boom.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+
+    def boom(_job_dir: Path, failing_manifest) -> None:
+        failing_manifest.current_stage = "finalize"
+        failing_manifest.checkpoint("finalize").attempts += 1
+        raise RuntimeError("finalize boom")
+
+    monkeypatch.setattr(service, "_stage_finalize", boom)
+
+    service.run_until_empty()
+
+    job_dir, loaded = service.store.find_job(manifest.job_id)
+    output_dir = Path(loaded.export_dir)
+    assert job_dir.parent.name == "failed"
+    assert (output_dir / loaded.artifacts["ja_srt"]).exists()
+    assert (output_dir / loaded.artifacts["literal_srt"]).exists()
+    assert (output_dir / loaded.artifacts["adapted_srt"]).exists()
+
+
+def test_failed_translation_keeps_readable_partial_direct_english_beside_source(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    ollama = FailOnSecondLiteralGroupOllama()
+    service = build_service(tmp_path, ollama)
+    primary_srt = tmp_path / "partial-literal.ja.srt"
+    write_srt_fixture(
+        primary_srt,
+        [
+            ("00:00:00,000", "00:00:01,000", "line 1"),
+            ("00:00:01,000", "00:00:02,000", "line 2"),
+            ("00:00:02,000", "00:00:03,000", "line 3"),
+            ("00:00:03,000", "00:00:04,000", "line 4"),
+            ("00:00:04,000", "00:00:05,000", "line 5"),
+            ("00:00:05,000", "00:00:06,000", "line 6"),
+            ("00:00:06,000", "00:00:07,000", "line 7"),
+        ],
+    )
+
+    manifest = service.import_existing(
+        profile="conservative",
+        primary_subtitle=primary_srt,
+        japanese=primary_srt,
+    )
+
+    with pytest.raises(QueueError, match="literal group 2 failed"):
+        service.rebuild_english(
+            manifest.job_id,
+            batch_label=None,
+            overall_context=None,
+            scene_contexts=[],
+        )
+
+    output_dir = subtitle_output_dir(primary_srt)
+    partial_literal = output_dir / "partial-literal.ja.en.literal.partial.srt"
+    final_literal = output_dir / "partial-literal.ja.en.literal.srt"
+    assert partial_literal.exists()
+    assert not final_literal.exists()
+    assert "literal line 1" in partial_literal.read_text(encoding="utf-8")
 
 
 def test_adapted_translation_uses_context_and_falls_back_to_literal_and_marks_review(
@@ -484,6 +767,47 @@ def test_rebuild_english_failure_keeps_previous_english_outputs(
     assert (export_dir / loaded.artifacts["adapted_srt"]).read_text(encoding="utf-8") == original_adapted_export
 
 
+def test_rebuild_without_easy_english_removes_previous_easy_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "toggle-easy.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+    service.run_until_empty()
+
+    job_dir, loaded = service.store.find_job(manifest.job_id)
+    export_dir = Path(loaded.export_dir)
+    assert (job_dir / loaded.artifacts["adapted_srt"]).exists()
+    assert (export_dir / loaded.artifacts["adapted_srt"]).exists()
+
+    service.save_job_notes(
+        manifest.job_id,
+        batch_label=None,
+        overall_context=None,
+        scene_contexts=[],
+        include_adapted_english=False,
+    )
+    rebuilt = service.rebuild_english(
+        manifest.job_id,
+        batch_label=None,
+        overall_context=None,
+        scene_contexts=[],
+        include_adapted_english=False,
+    )
+
+    _job_dir, reloaded = service.store.find_job(rebuilt.job_id)
+    preview = service.preview_rows(rebuilt.job_id)
+
+    assert reloaded.include_adapted_english is False
+    assert reloaded.checkpoint(STAGE_ADAPTED).details["mode"] == "skipped"
+    assert not (job_dir / reloaded.artifacts["adapted_srt"]).exists()
+    assert not (export_dir / reloaded.artifacts["adapted_srt"]).exists()
+    assert all(row["adapted_english"] == "" for row in preview)
+
+
 def test_import_existing_video_linked_japanese_and_reference_tracks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -631,6 +955,80 @@ def test_import_existing_reuses_matching_job_instead_of_duplicating(
 
     assert first.job_id == second.job_id
     assert [row["job_id"] for row in rows] == [first.job_id]
+
+
+def test_status_rows_include_stage_and_overall_progress(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "progress-scene.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+    job_dir, manifest = service.store.find_job(manifest.job_id)
+    manifest.status = JOB_STATUS_WORKING
+    manifest.current_stage = STAGE_EXTRACT
+    manifest.current_progress = StageProgress(
+        stage=STAGE_EXTRACT,
+        current=600.0,
+        total=1200.0,
+        unit="seconds",
+        percent=50.0,
+        eta_seconds=600.0,
+        done_seconds=600.0,
+        total_seconds=1200.0,
+        message="Audio chunk 2 of 4",
+    )
+    service.store.save_manifest(job_dir, manifest)
+
+    row = service.status_rows()[0]
+
+    assert row["step_text"].startswith("Getting the audio ready")
+    assert row["stage_progress_percent"] == "50.00"
+    assert row["overall_progress_percent"] == "10.00"
+    assert row["stage_eta_seconds"] == "600.00"
+    assert row["stage_progress_message"] == "Audio chunk 2 of 4"
+
+
+def test_rebuild_english_splits_batches_when_model_returns_too_few_lines(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SplitRecoveringOllama())
+    primary_srt = tmp_path / "split-recovery.ja.srt"
+    write_srt_fixture(
+        primary_srt,
+        [
+            ("00:00:00,000", "00:00:01,000", "line 1"),
+            ("00:00:01,000", "00:00:02,000", "line 2"),
+            ("00:00:02,000", "00:00:03,000", "line 3"),
+            ("00:00:03,000", "00:00:04,000", "line 4"),
+            ("00:00:04,000", "00:00:05,000", "line 5"),
+            ("00:00:05,000", "00:00:06,000", "line 6"),
+        ],
+    )
+
+    manifest = service.import_existing(
+        profile="conservative",
+        primary_subtitle=primary_srt,
+        japanese=primary_srt,
+    )
+
+    rebuilt = service.rebuild_english(
+        manifest.job_id,
+        batch_label=None,
+        overall_context=None,
+        scene_contexts=[],
+    )
+
+    _job_dir, loaded = service.store.find_job(rebuilt.job_id)
+    preview = service.preview_rows(rebuilt.job_id)
+    review_path = Path(loaded.export_dir) / loaded.artifacts["review"]
+    review = review_path.read_text(encoding="utf-8")
+
+    assert len(preview) == 6
+    assert all(row["literal_english"] for row in preview)
+    assert all(row["adapted_english"] for row in preview)
+    assert "translation-batch-retry" in review
 
 
 def test_import_existing_requires_a_real_source_track(

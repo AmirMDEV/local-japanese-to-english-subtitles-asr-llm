@@ -18,6 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--series")
     enqueue.add_argument("--context")
     enqueue.add_argument("--recursive", action="store_true")
+    enqueue.add_argument("--no-easy-english", action="store_true")
 
     subparsers.add_parser("worker", help="Process queued jobs until the queue is empty.")
     subparsers.add_parser("status", help="Show queue status.")
@@ -38,6 +39,7 @@ def build_parser() -> argparse.ArgumentParser:
     import_existing.add_argument("--reference")
     import_existing.add_argument("--series")
     import_existing.add_argument("--context")
+    import_existing.add_argument("--no-easy-english", action="store_true")
 
     rebuild = subparsers.add_parser("rebuild-english", help="Rebuild English subtitle outputs for one job.")
     rebuild.add_argument("job_id")
@@ -71,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
                         series=args.series,
                         context=args.context,
                         recursive=args.recursive,
+                        include_adapted_english=not args.no_easy_english,
                     )
                     print(f"Queued {len(manifests)} videos from {source_path}")
                     if skipped:
@@ -84,6 +87,7 @@ def main(argv: list[str] | None = None) -> int:
                     glossary=glossary,
                     series=args.series,
                     context=args.context,
+                    include_adapted_english=not args.no_easy_english,
                 )
                 print(f"Queued {manifest.source_name} as {manifest.job_id}")
             return 0
@@ -121,6 +125,7 @@ def main(argv: list[str] | None = None) -> int:
                 reference=Path(args.reference) if args.reference else None,
                 series=args.series,
                 context=args.context,
+                include_adapted_english=not args.no_easy_english,
             )
             print(f"Imported existing subtitles into {manifest.job_id}")
             return 0

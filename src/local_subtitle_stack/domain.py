@@ -6,7 +6,7 @@ from typing import Any
 
 from .utils import now_iso, subtitle_output_dir
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_WORKING = "working"
 JOB_STATUS_PAUSED = "paused"
@@ -99,6 +99,49 @@ class StageCheckpoint:
 
 
 @dataclass(slots=True)
+class StageProgress:
+    stage: str
+    current: float = 0.0
+    total: float = 0.0
+    unit: str = "items"
+    percent: float = 0.0
+    started_at: str = field(default_factory=now_iso)
+    updated_at: str = field(default_factory=now_iso)
+    eta_seconds: float | None = None
+    done_seconds: float | None = None
+    total_seconds: float | None = None
+    message: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "StageProgress":
+        return cls(
+            stage=str(data["stage"]),
+            current=float(data.get("current", 0.0)),
+            total=float(data.get("total", 0.0)),
+            unit=str(data.get("unit", "items")),
+            percent=float(data.get("percent", 0.0)),
+            started_at=str(data.get("started_at", now_iso())),
+            updated_at=str(data.get("updated_at", now_iso())),
+            eta_seconds=(
+                float(data["eta_seconds"])
+                if data.get("eta_seconds") is not None
+                else None
+            ),
+            done_seconds=(
+                float(data["done_seconds"])
+                if data.get("done_seconds") is not None
+                else None
+            ),
+            total_seconds=(
+                float(data["total_seconds"])
+                if data.get("total_seconds") is not None
+                else None
+            ),
+            message=str(data["message"]) if data.get("message") is not None else None,
+        )
+
+
+@dataclass(slots=True)
 class MetricsSummary:
     peak_rss_mb: int = 0
     peak_gpu_used_mb: int = 0
@@ -150,9 +193,11 @@ class JobManifest:
     linked_video_path: str | None = None
     translation_source_role: str = TRANSLATION_SOURCE_JA
     imported_tracks: dict[str, str] = field(default_factory=dict)
+    include_adapted_english: bool = True
     error: str | None = None
     models: dict[str, str] = field(default_factory=dict)
     checkpoints: dict[str, StageCheckpoint] = field(default_factory=dict)
+    current_progress: StageProgress | None = None
     chunk_plan: list[ChunkPlan] = field(default_factory=list)
     metrics: MetricsSummary = field(default_factory=MetricsSummary)
     review_flags: list[ReviewFlag] = field(default_factory=list)
@@ -207,6 +252,7 @@ class JobManifest:
                 data.get("translation_source_role", TRANSLATION_SOURCE_JA)
             ),
             imported_tracks=dict(data.get("imported_tracks", {})),
+            include_adapted_english=bool(data.get("include_adapted_english", True)),
             error=data.get("error"),
             models=dict(data.get("models", {})),
             artifacts=dict(data.get("artifacts", {})),
@@ -224,6 +270,9 @@ class JobManifest:
             ReviewFlag.from_dict(item) for item in list(data.get("review_flags", []))
         ]
         manifest.metrics = MetricsSummary.from_dict(dict(data.get("metrics", {})))
+        progress_data = data.get("current_progress")
+        if isinstance(progress_data, dict):
+            manifest.current_progress = StageProgress.from_dict(progress_data)
         return manifest
 
     def mark_updated(self) -> None:

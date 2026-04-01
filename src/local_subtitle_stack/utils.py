@@ -17,6 +17,41 @@ def now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
+def parse_iso_datetime(value: str) -> datetime:
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def elapsed_seconds_since(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        started_at = parse_iso_datetime(value)
+    except ValueError:
+        return None
+    return max((datetime.now(UTC) - started_at).total_seconds(), 0.0)
+
+
+def format_duration_compact(value: float | None) -> str:
+    if value is None:
+        return ""
+    total_seconds = max(int(round(value)), 0)
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    if minutes and seconds:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{minutes}m"
+
+
 def atomic_write_text(path: Path, content: str, encoding: str = "utf-8") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path: Path | None = None
