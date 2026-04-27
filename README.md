@@ -63,8 +63,25 @@ You only need to install these once:
 - [Ollama](https://ollama.com/download) for the English subtitle model
 - [FFmpeg](https://ffmpeg.org/download.html) so the app can read video audio
 - [Subtitle Edit](https://www.nikse.dk/subtitleedit) if you want one-click review in Subtitle Edit
+- [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for the free local batch transcription path
 
 The app itself does not ship with the big AI models inside it. You pick where those go.
+
+## Free Local Batch Transcription
+
+For a course transcript workflow, use the adaptive batch command:
+
+```powershell
+subtitle-tool transcribe-batch --input-dir "C:\Videos\Course" --output-dir "C:\Transcripts\Course" --language en
+```
+
+It will:
+
+- probe free RAM and VRAM before each file
+- choose the best profile it can actually fit
+- downgrade automatically if a larger profile fails
+- write raw `.txt`, `.srt`, `.segments.json`, and `.meta.json` files per video
+- write a `course.raw.txt` and `course_manifest.json` for the full batch
 
 ## Release Files Explained
 
@@ -133,7 +150,7 @@ This folder is where the Japanese transcription model gets downloaded the first 
 
 The app starts with recommended defaults:
 
-- Japanese model: `kotoba-tech/kotoba-whisper-v1.1`
+- Japanese model: `kotoba-tech/kotoba-whisper-v2.1`
 - Direct English model: `qwen3:4b-q8_0`
 - Natural English model: `qwen3:4b-q8_0`
 
@@ -259,9 +276,13 @@ The app writes the changes back into the saved subtitle files for that job.
 If you are not sure what to use, start here:
 
 - Speed mode: `Safe and steady (recommended)`
-- Japanese model: `kotoba-tech/kotoba-whisper-v1.1`
+- Japanese listening engine: `Kotoba Japanese quality (recommended)`
+- Whisper speed profile: `Auto choose best fit`
+- Japanese model: `kotoba-tech/kotoba-whisper-v2.1`
 - Direct English model: `qwen3:4b-q8_0`
 - Natural English model: `qwen3:4b-q8_0`
+
+For videos around two hours or longer, use `Kotoba Japanese quality` when subtitle accuracy matters most. Use `Fast local Whisper` only when you need a quicker rough pass. The app writes partial Japanese and English subtitle files as it works and can resume from saved checkpoints if a long run stops.
 
 ## Network drives and external drives
 

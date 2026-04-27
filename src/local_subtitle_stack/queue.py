@@ -106,6 +106,7 @@ class QueueStore:
         translation_source_role: str = TRANSLATION_SOURCE_JA,
         imported_tracks: dict[str, str] | None = None,
         include_adapted_english: bool = True,
+        prefer_fast_translation: bool = False,
     ) -> JobManifest:
         if not source_path.exists():
             raise QueueError(f"Source not found: {source_path}")
@@ -132,6 +133,7 @@ class QueueStore:
             translation_source_role=translation_source_role,
             imported_tracks=dict(imported_tracks or {}),
             include_adapted_english=include_adapted_english,
+            prefer_fast_translation=prefer_fast_translation,
         )
         manifest.artifacts = {
             "job": manifest.job_filename(),

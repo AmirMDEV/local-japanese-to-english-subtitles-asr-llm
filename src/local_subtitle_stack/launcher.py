@@ -12,8 +12,12 @@ CLI_COMMANDS = {
     "resume",
     "import-existing",
     "rebuild-english",
+    "rebuild-english-range",
+    "attach-track",
+    "open-subtitle",
     "open-review",
     "open-output",
+    "health-check",
     "pause",
     "unpause",
 }

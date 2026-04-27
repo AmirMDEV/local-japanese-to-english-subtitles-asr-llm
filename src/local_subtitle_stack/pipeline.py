@@ -349,12 +349,19 @@ def parse_srt(path: Path) -> list[Cue]:
 
 def write_srt(path: Path, cues: list[Cue]) -> None:
     lines: list[str] = []
+    previous_end = 0.0
     for index, cue in enumerate(cues, start=1):
-        end = max(cue.end, cue.start + 0.5)
+        start = max(cue.start, previous_end, 0.0)
+        end = max(cue.end, start + 0.5)
+        if index < len(cues):
+            next_start = max(cues[index].start, 0.0)
+            if next_start > start and end > next_start:
+                end = max(start + 0.001, next_start - 0.001)
+        previous_end = end
         lines.extend(
             [
                 str(index),
-                f"{format_srt_timestamp(cue.start)} --> {format_srt_timestamp(end)}",
+                f"{format_srt_timestamp(start)} --> {format_srt_timestamp(end)}",
                 cue.text.strip(),
                 "",
             ]

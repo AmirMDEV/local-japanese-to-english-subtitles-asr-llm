@@ -14,6 +14,7 @@ from local_subtitle_stack.domain import (
     StageProgress,
     STAGE_ADAPTED,
     STAGE_EXTRACT,
+    STAGE_TRANSCRIBE,
     SOURCE_KIND_SUBTITLE,
     SOURCE_KIND_VIDEO,
     TRANSLATION_SOURCE_DIRECT_EN,
@@ -29,6 +30,10 @@ from local_subtitle_stack.utils import subtitle_output_dir
 class FakeFFmpeg:
     def __init__(self) -> None:
         self.extract_calls: list[dict[str, float | str]] = []
+        self.extract_audio_calls: list[dict[str, str]] = []
+
+    def probe_duration(self, source_path: Path) -> float:
+        return 12.0
 
     def create_chunk_plan(
         self,
@@ -81,6 +86,19 @@ class FakeFFmpeg:
         if progress_callback is not None:
             progress_callback(duration / 2)
             progress_callback(duration)
+
+    def extract_audio(self, *, source_path: Path, audio_path: Path, progress_callback=None) -> None:
+        self.extract_audio_calls.append(
+            {
+                "source_path": str(source_path),
+                "audio_path": str(audio_path),
+            }
+        )
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_text("audio", encoding="utf-8")
+        if progress_callback is not None:
+            progress_callback(6.0)
+            progress_callback(12.0)
 
 
 class FakeSubtitleEdit(SubtitleEditClient):
@@ -203,7 +221,7 @@ def build_config(tmp_path: Path) -> AppConfig:
         queue_root=str(tmp_path / "queue"),
         tools=ToolPaths(ffmpeg="ffmpeg", ffprobe="ffprobe", ollama="ollama", subtitle_edit="subtitle", python311="py311"),
         cache_paths=CachePaths(),
-        models=ModelConfig(),
+        models=ModelConfig(asr_engine="kotoba"),
         profiles=default_profiles(),
     )
 
@@ -295,6 +313,52 @@ def test_worker_creates_local_and_exported_outputs(monkeypatch: pytest.MonkeyPat
     assert (output_dir / loaded.artifacts["review"]).exists()
     assert not (output_dir / "scene.en.literal.partial.srt").exists()
     assert not (output_dir / "scene.en.adapted.partial.srt").exists()
+
+
+def test_fast_whisper_engine_uses_single_audio_pass(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+
+    class FakeFastWhisperBackend:
+        def __init__(self, profile, cache_dir: str | None = None) -> None:
+            self.profile = profile
+            self.cache_dir = cache_dir
+
+        def transcribe(self, audio_path: Path, language: str):
+            assert audio_path.name == "source.wav"
+            assert language == "ja"
+            return (
+                [
+                    Cue(index=1, start=0.0, end=1.2, text="motto shite"),
+                    Cue(index=2, start=1.6, end=3.1, text="onegai"),
+                ],
+                {"duration": 12.0, "detected_language": "ja", "language_probability": 0.99},
+            )
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr("local_subtitle_stack.service.FasterWhisperBackend", FakeFastWhisperBackend)
+    service = build_service(tmp_path, SuccessfulOllama())
+    service.config.models.asr_engine = "faster-whisper"
+    service.config.models.faster_whisper_profile = "auto"
+    source = tmp_path / "fast-scene.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+
+    service.run_until_empty()
+
+    assert isinstance(service.ffmpeg, FakeFFmpeg)
+    job_dir, loaded = service.store.find_job(manifest.job_id)
+    output_dir = Path(loaded.export_dir)
+    assert job_dir.parent.name == "done"
+    assert service.ffmpeg.extract_audio_calls
+    assert service.ffmpeg.extract_calls == []
+    assert loaded.checkpoint(STAGE_TRANSCRIBE).details["engine"] == "faster-whisper"
+    assert (output_dir / loaded.artifacts["ja_srt"]).exists()
+    assert (output_dir / loaded.artifacts["literal_srt"]).exists()
 
 
 def test_enqueue_creates_source_side_output_folder(
@@ -592,6 +656,25 @@ def test_job_start_floor_switches_after_transcribe(monkeypatch: pytest.MonkeyPat
     assert (
         service._job_start_min_free_ram(manifest, profile)
         == profile.min_free_ram_translation_mb
+    )
+
+
+def test_translation_resume_uses_resume_floor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "resume-floor.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="conservative")
+    profile = service.config.profile("conservative")
+
+    manifest.checkpoint("transcribe").status = "completed"
+    manifest.checkpoint("translate_literal").attempts = 1
+    manifest.checkpoint("translate_literal").details["completed_groups"] = 4
+
+    assert service._job_start_min_free_ram(manifest, profile) == profile.min_free_ram_translation_resume_mb
+    assert (
+        service._translation_stage_min_free_ram(manifest, profile, "translate_literal")
+        == profile.min_free_ram_translation_resume_mb
     )
 
 

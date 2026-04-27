@@ -3,8 +3,10 @@ from __future__ import annotations
 import gc
 import json
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import requests
 
@@ -149,6 +151,66 @@ class FFmpegClient:
         if return_code != 0:
             raise subprocess.CalledProcessError(return_code, args)
 
+    def extract_audio(
+        self,
+        *,
+        source_path: Path,
+        audio_path: Path,
+        progress_callback: Callable[[float], None] | None = None,
+    ) -> None:
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        args = [
+            self.ffmpeg_path,
+            "-y",
+            "-i",
+            str(source_path),
+            "-vn",
+            "-sn",
+            "-dn",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-c:a",
+            "pcm_s16le",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            str(audio_path),
+        ]
+        process = subprocess.Popen(
+            args,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            creationflags=no_window_creationflags(),
+        )
+        latest_progress = 0.0
+        try:
+            assert process.stdout is not None
+            for raw_line in process.stdout:
+                line = raw_line.strip()
+                if not line or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                if key == "out_time":
+                    latest_progress = self._parse_ffmpeg_timecode(value)
+                    if progress_callback is not None:
+                        progress_callback(latest_progress)
+                elif key in {"out_time_ms", "out_time_us"}:
+                    latest_progress = self._parse_ffmpeg_progress_value(value)
+                    if progress_callback is not None:
+                        progress_callback(latest_progress)
+                elif key == "progress" and value == "end":
+                    if progress_callback is not None:
+                        progress_callback(latest_progress)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+        return_code = process.wait()
+        if return_code != 0:
+            raise subprocess.CalledProcessError(return_code, args)
+
     def _parse_ffmpeg_timecode(self, value: str) -> float:
         parts = value.strip().split(":")
         if len(parts) != 3:
@@ -159,7 +221,10 @@ class FFmpegClient:
         return hours * 3600 + minutes * 60 + seconds
 
     def _parse_ffmpeg_progress_value(self, value: str) -> float:
-        raw_value = max(float(value.strip() or 0.0), 0.0)
+        cleaned = value.strip()
+        if not cleaned or cleaned.upper() == "N/A":
+            return 0.0
+        raw_value = max(float(cleaned), 0.0)
         if raw_value >= 10_000_000:
             return raw_value / 1_000_000
         if raw_value >= 10_000:
@@ -245,19 +310,94 @@ class TransformersASRClient:
 
 
 class OllamaClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:11434", keep_alive: str = "5m") -> None:
+    def __init__(
+        self,
+        base_url: str = "http://127.0.0.1:11434",
+        keep_alive: str = "5m",
+        executable_path: str = "",
+        startup_timeout_seconds: float = 20.0,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.keep_alive = keep_alive
+        self.executable_path = executable_path or "ollama"
+        self.startup_timeout_seconds = startup_timeout_seconds
+        self._recent_events: list[dict[str, str]] = []
+
+    def _record_event(self, level: str, message: str) -> None:
+        self._recent_events.append({"level": level, "message": message})
+        if len(self._recent_events) > 40:
+            self._recent_events = self._recent_events[-40:]
+
+    def pop_recent_events(self) -> list[dict[str, str]]:
+        events = list(self._recent_events)
+        self._recent_events.clear()
+        return events
+
+    def _request(self, method: str, path: str, *, timeout: float, **kwargs: Any) -> requests.Response:
+        url = f"{self.base_url}{path}"
+        try:
+            response = requests.request(method, url, timeout=timeout, **kwargs)
+        except requests.ConnectionError:
+            if not self._can_auto_start():
+                raise
+            self.ensure_available()
+            self._record_event("warning", "Ollama was restarted automatically so English translation could continue.")
+            response = requests.request(method, url, timeout=timeout, **kwargs)
+        response.raise_for_status()
+        return response
+
+    def _can_auto_start(self) -> bool:
+        hostname = (urlparse(self.base_url).hostname or "").strip().lower()
+        return hostname in {"127.0.0.1", "localhost", "::1"}
+
+    def is_available(self, timeout: float = 2.0) -> bool:
+        try:
+            response = requests.request("GET", f"{self.base_url}/api/tags", timeout=timeout)
+            response.raise_for_status()
+        except requests.RequestException:
+            return False
+        return True
+
+    def ensure_available(self) -> None:
+        if self.is_available():
+            return
+        if not self._can_auto_start():
+            return
+        self._start_server()
+
+    def _start_server(self) -> None:
+        try:
+            subprocess.Popen(
+                [self.executable_path, "serve"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=no_window_creationflags(),
+            )
+        except OSError as exc:
+            raise ExternalToolError(
+                f"Could not start Ollama from '{self.executable_path}': {exc}"
+            ) from exc
+        self._record_event("warning", "Ollama was not running and the app started it automatically.")
+
+        deadline = time.monotonic() + self.startup_timeout_seconds
+        while time.monotonic() < deadline:
+            if self.is_available(timeout=1.0):
+                self._record_event("info", "Ollama is ready again.")
+                return
+            time.sleep(0.5)
+        raise ExternalToolError(
+            f"Ollama did not become ready within {self.startup_timeout_seconds:.0f} seconds."
+        )
 
     def list_models(self) -> list[str]:
-        response = requests.get(f"{self.base_url}/api/tags", timeout=30)
-        response.raise_for_status()
+        response = self._request("GET", "/api/tags", timeout=30)
         payload = response.json()
         return [item["name"] for item in payload.get("models", [])]
 
     def generate_json(self, model: str, prompt: str, temperature: float) -> dict[str, Any]:
-        response = requests.post(
-            f"{self.base_url}/api/generate",
+        response = self._request(
+            "POST",
+            "/api/generate",
             json={
                 "model": model,
                 "prompt": prompt,
@@ -268,7 +408,6 @@ class OllamaClient:
             },
             timeout=180,
         )
-        response.raise_for_status()
         payload = response.json()
         body = payload.get("response", "{}")
         return json.loads(body)

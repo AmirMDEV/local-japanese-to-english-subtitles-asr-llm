@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
+from .adaptive_transcription import (
+    FasterWhisperBackend,
+    TRANSCRIPTION_PROFILE_LADDER,
+    TranscriptionProfile,
+    _is_memory_failure,
+    ordered_profile_candidates,
+)
 from .config import AppConfig
 from .domain import (
     JOB_STATUS_COMPLETED,
@@ -14,6 +23,7 @@ from .domain import (
     STAGE_LITERAL,
     STAGE_TRANSCRIBE,
     Cue,
+    JobEvent,
     JobManifest,
     ReviewFlag,
     SceneContextBlock,
@@ -60,8 +70,11 @@ from .utils import (
     atomic_write_text,
     elapsed_seconds_since,
     format_duration_compact,
+    format_timecode,
     list_video_sources,
     now_iso,
+    parse_iso_datetime,
+    parse_timecode,
     read_json,
     subtitle_output_dir,
 )
@@ -78,6 +91,9 @@ STAGE_DISPLAY_LABELS = {
     STAGE_ADAPTED: "Making easy English",
     STAGE_FINALIZE: "Saving the subtitle files",
 }
+
+ASR_ENGINE_FASTER_WHISPER = "faster-whisper"
+ASR_ENGINE_KOTOBA = "kotoba"
 
 
 class WorkerService:
@@ -106,6 +122,7 @@ class WorkerService:
         context: str | None = None,
         scene_contexts: list[SceneContextBlock] | None = None,
         include_adapted_english: bool = True,
+        prefer_fast_translation: bool = False,
     ) -> JobManifest:
         self._require_profile(profile)
         manifest = self.store.enqueue(
@@ -116,8 +133,12 @@ class WorkerService:
             job_context=context,
             scene_contexts=scene_contexts,
             include_adapted_english=include_adapted_english,
+            prefer_fast_translation=prefer_fast_translation,
         )
         self._ensure_output_dir_for_manifest(manifest)
+        job_dir, manifest = self.store.find_job(manifest.job_id)
+        self._append_event(manifest, "info", f"Queued {manifest.source_name}.")
+        self._save_manifest(job_dir, manifest)
         return manifest
 
     def enqueue_many(
@@ -129,6 +150,7 @@ class WorkerService:
         context: str | None = None,
         scene_contexts: list[SceneContextBlock] | None = None,
         include_adapted_english: bool = True,
+        prefer_fast_translation: bool = False,
     ) -> tuple[list[JobManifest], list[Path]]:
         self._require_profile(profile)
         manifests: list[JobManifest] = []
@@ -155,6 +177,7 @@ class WorkerService:
                     context=context,
                     scene_contexts=scene_contexts,
                     include_adapted_english=include_adapted_english,
+                    prefer_fast_translation=prefer_fast_translation,
                 )
             )
         return manifests, skipped
@@ -169,6 +192,7 @@ class WorkerService:
         scene_contexts: list[SceneContextBlock] | None = None,
         recursive: bool = False,
         include_adapted_english: bool = True,
+        prefer_fast_translation: bool = False,
     ) -> tuple[list[JobManifest], list[Path]]:
         if not folder.exists():
             raise QueueError(f"Folder not found: {folder}")
@@ -183,6 +207,7 @@ class WorkerService:
             context=context,
             scene_contexts=scene_contexts,
             include_adapted_english=include_adapted_english,
+            prefer_fast_translation=prefer_fast_translation,
         )
 
     def detect_existing_subtitles(self, video: Path) -> dict[str, Path]:
@@ -239,6 +264,7 @@ class WorkerService:
         context: str | None = None,
         scene_contexts: list[SceneContextBlock] | None = None,
         include_adapted_english: bool = True,
+        prefer_fast_translation: bool = False,
     ) -> JobManifest:
         self._require_profile(profile)
         if bool(video) == bool(primary_subtitle):
@@ -294,6 +320,7 @@ class WorkerService:
                 translation_source_role=translation_source_role,
                 imported_tracks={role: str(path) for role, path in tracks.items()},
                 include_adapted_english=include_adapted_english,
+                prefer_fast_translation=prefer_fast_translation,
             )
             job_dir, manifest = self.store.find_job(manifest.job_id)
         else:
@@ -304,6 +331,7 @@ class WorkerService:
             manifest.translation_source_role = translation_source_role
             manifest.imported_tracks.update({role: str(path) for role, path in tracks.items()})
             manifest.include_adapted_english = include_adapted_english
+            manifest.prefer_fast_translation = prefer_fast_translation
             if series is not None:
                 manifest.series = series
             if context is not None:
@@ -311,6 +339,7 @@ class WorkerService:
             if scene_contexts is not None:
                 manifest.scene_contexts = list(scene_contexts)
         manifest.include_adapted_english = include_adapted_english
+        manifest.prefer_fast_translation = prefer_fast_translation
 
         if series is not None:
             manifest.series = series
@@ -322,6 +351,7 @@ class WorkerService:
         self._ensure_output_dir_for_manifest(manifest)
         self._seed_imported_tracks(job_dir, manifest, tracks)
         self._mark_imported_source_checkpoints(manifest)
+        self._append_event(manifest, "info", f"Imported existing subtitles for {manifest.source_name}.")
         manifest.status = JOB_STATUS_COMPLETED
         manifest.current_stage = STAGE_FINALIZE
         review_path = job_dir / manifest.artifacts["review"]
@@ -339,6 +369,7 @@ class WorkerService:
         rows: list[dict[str, str]] = []
         for _job_dir, manifest, state in self.store.list_jobs():
             progress = manifest.current_progress
+            latest_event = manifest.events[-1] if manifest.events else None
             rows.append(
                 {
                     "job_id": manifest.job_id,
@@ -360,6 +391,12 @@ class WorkerService:
                     "translation_source_role": manifest.translation_source_role,
                     "has_reference": "true" if manifest.imported_tracks.get("reference") else "false",
                     "include_adapted_english": "true" if manifest.include_adapted_english else "false",
+                    "prefer_fast_translation": "true" if manifest.prefer_fast_translation else "false",
+                    "current_model": self._current_model_name(manifest),
+                    "latest_event_message": latest_event.message if latest_event else "",
+                    "latest_event_level": latest_event.level if latest_event else "",
+                    "latest_event_at": latest_event.created_at if latest_event else "",
+                    "latest_event_stage": latest_event.stage or "" if latest_event else "",
                 }
             )
         return rows
@@ -458,6 +495,7 @@ class WorkerService:
         overall_context: str | None,
         scene_contexts: list[SceneContextBlock],
         include_adapted_english: bool | None = None,
+        prefer_fast_translation: bool | None = None,
     ) -> JobManifest:
         job_dir, manifest = self.store.find_job(job_id)
         manifest.series = batch_label or None
@@ -465,6 +503,8 @@ class WorkerService:
         manifest.scene_contexts = list(scene_contexts)
         if include_adapted_english is not None:
             manifest.include_adapted_english = include_adapted_english
+        if prefer_fast_translation is not None:
+            manifest.prefer_fast_translation = prefer_fast_translation
         self._save_manifest(job_dir, manifest)
         return manifest
 
@@ -476,6 +516,7 @@ class WorkerService:
         overall_context: str | None,
         scene_contexts: list[SceneContextBlock],
         include_adapted_english: bool | None = None,
+        prefer_fast_translation: bool | None = None,
     ) -> JobManifest:
         job_dir, manifest = self.store.find_job(job_id)
         if not self._translation_source_path(job_dir, manifest).exists():
@@ -487,6 +528,8 @@ class WorkerService:
         manifest.scene_contexts = list(scene_contexts)
         if include_adapted_english is not None:
             manifest.include_adapted_english = include_adapted_english
+        if prefer_fast_translation is not None:
+            manifest.prefer_fast_translation = prefer_fast_translation
         self._save_manifest(job_dir, manifest)
         self._rebuild_english_transactional(job_dir, manifest)
         return manifest
@@ -499,6 +542,78 @@ class WorkerService:
             self._require_profile(manifest.profile)
             self._rebuild_english_transactional(job_dir, manifest)
             return manifest
+
+    def rebuild_english_range(
+        self,
+        job_id: str,
+        *,
+        batch_label: str | None,
+        overall_context: str | None,
+        scene_contexts: list[SceneContextBlock],
+        start_seconds: float,
+        end_seconds: float,
+        include_adapted_english: bool | None = None,
+        prefer_fast_translation: bool | None = None,
+    ) -> JobManifest:
+        job_dir, manifest = self.store.find_job(job_id)
+        if end_seconds <= start_seconds:
+            raise QueueError("The end time must be after the start time.")
+        if not self._translation_source_path(job_dir, manifest).exists():
+            raise QueueError("Source subtitle lines are not ready yet for this job.")
+        manifest.series = batch_label or None
+        manifest.job_context = overall_context or None
+        manifest.scene_contexts = list(scene_contexts)
+        if include_adapted_english is not None:
+            manifest.include_adapted_english = include_adapted_english
+        if prefer_fast_translation is not None:
+            manifest.prefer_fast_translation = prefer_fast_translation
+        self._save_manifest(job_dir, manifest)
+        with self.store.acquire_worker_lock():
+            self._rebuild_english_range_transactional(job_dir, manifest, start_seconds, end_seconds)
+        return manifest
+
+    def rebuild_english_range_from_saved_notes(
+        self,
+        job_id: str,
+        *,
+        start_timecode: str,
+        end_timecode: str,
+    ) -> JobManifest:
+        with self.store.acquire_worker_lock():
+            job_dir, manifest = self.store.find_job(job_id)
+            if not self._translation_source_path(job_dir, manifest).exists():
+                raise QueueError("Source subtitle lines are not ready yet for this job.")
+            self._rebuild_english_range_transactional(
+                job_dir,
+                manifest,
+                parse_timecode(start_timecode),
+                parse_timecode(end_timecode),
+            )
+            return manifest
+
+    def attach_existing_subtitle(self, job_id: str, *, role: str, subtitle_path: Path) -> JobManifest:
+        if role not in {"ja", "direct", "easy", "reference"}:
+            raise QueueError(f"Unsupported subtitle role: {role}")
+        if subtitle_path.suffix.lower() != ".srt":
+            raise QueueError("Only .srt files can be attached right now.")
+        if not subtitle_path.exists():
+            raise QueueError(f"Subtitle file not found: {subtitle_path}")
+        job_dir, manifest = self.store.find_job(job_id)
+        self._seed_imported_tracks(job_dir, manifest, {role: subtitle_path.resolve()})
+        manifest.imported_tracks[role] = str(subtitle_path.resolve())
+        if role == "ja":
+            manifest.translation_source_role = TRANSLATION_SOURCE_JA
+            self._mark_imported_source_checkpoints(manifest)
+        elif role == "direct" and not (job_dir / manifest.artifacts["ja_cues"]).exists():
+            manifest.translation_source_role = TRANSLATION_SOURCE_DIRECT_EN
+            self._mark_imported_source_checkpoints(manifest)
+        self._append_event(
+            manifest,
+            "info",
+            f"Attached {self._role_display_name(role)} subtitles from {subtitle_path.name}.",
+        )
+        self._save_manifest(job_dir, manifest)
+        return manifest
 
     def run_until_empty(self) -> None:
         with self.store.acquire_worker_lock():
@@ -515,7 +630,9 @@ class WorkerService:
                     continue
 
     def resume(self, job_id: str) -> JobManifest:
-        _job_dir, manifest = self.store.resume_job(job_id)
+        job_dir, manifest = self.store.resume_job(job_id)
+        self._append_event(manifest, "info", "The job was re-queued to continue from where it left off.")
+        self._save_manifest(job_dir, manifest)
         return manifest
 
     def open_review(self, job_id: str | None = None) -> list[Path]:
@@ -534,6 +651,108 @@ class WorkerService:
         target = output_dir if output_dir.exists() else Path(manifest.source_path).parent
         subprocess.Popen(["explorer", str(target)])
         return target
+
+    def subtitle_file_paths(self, job_id: str) -> dict[str, Path]:
+        job_dir, manifest = self.store.find_job(job_id)
+        self._sync_existing_outputs_to_export(job_dir, manifest)
+        output_dir = self._ensure_output_dir_for_manifest(manifest)
+        paths = {
+            "ja": output_dir / manifest.artifacts["ja_srt"],
+            "direct": output_dir / manifest.artifacts["literal_srt"],
+            "easy": output_dir / manifest.artifacts["adapted_srt"],
+            "review": output_dir / manifest.artifacts["review"],
+        }
+        for artifact_key, output_key in (("literal_srt", "direct-partial"), ("adapted_srt", "easy-partial")):
+            _local_partial, export_partial = self._partial_srt_paths(job_dir, manifest, artifact_key)
+            paths[output_key] = export_partial
+        return paths
+
+    def open_subtitle_file(self, job_id: str, kind: str) -> Path:
+        paths = self.subtitle_file_paths(job_id)
+        target = paths.get(kind)
+        if target is None or not target.exists():
+            raise QueueError(f"The selected {kind} subtitle file is not ready yet.")
+        if os.name == "nt":
+            os.startfile(str(target))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", str(target)])
+        return target
+
+    def health_check(self) -> dict[str, object]:
+        checks: list[dict[str, str]] = []
+
+        def add(status: str, name: str, detail: str) -> None:
+            checks.append({"status": status, "name": name, "detail": detail})
+
+        queue_root = self.config.queue_root_path
+        add("ok" if queue_root.exists() else "error", "Queue folder", str(queue_root))
+
+        for name, value, version_arg in (
+            ("FFmpeg", self.config.tools.ffmpeg or "ffmpeg", "-version"),
+            ("FFprobe", self.config.tools.ffprobe or "ffprobe", "-version"),
+            ("Ollama", self.config.tools.ollama or "ollama", "--version"),
+        ):
+            try:
+                subprocess.run(
+                    [value, version_arg],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception as exc:
+                add("error", name, f"Not ready: {exc}")
+            else:
+                add("ok", name, f"Ready from {value}")
+
+        subtitle_edit_path = self.config.tools.subtitle_edit
+        if subtitle_edit_path and Path(subtitle_edit_path).exists():
+            add("ok", "Subtitle Edit", subtitle_edit_path)
+        else:
+            add("warning", "Subtitle Edit", "Path is missing or not set.")
+
+        models: list[str] = []
+        try:
+            self.ollama.ensure_available()
+            models = self.ollama.list_models()
+        except Exception as exc:
+            add("error", "Ollama API", f"Could not connect: {exc}")
+        else:
+            add("ok", "Ollama API", f"Connected. {len(models)} model(s) found.")
+
+        for name, model in (
+            ("Direct English model", self.config.models.literal_translation),
+            ("Easy English model", self.config.models.adapted_translation),
+        ):
+            if not models:
+                add("warning", name, f"Could not verify {model} because Ollama was unavailable.")
+            elif model in models:
+                add("ok", name, model)
+            else:
+                add("warning", name, f"{model} is not installed in Ollama yet.")
+
+        asr_model = self.config.models.asr
+        add(
+            "ok" if asr_model else "warning",
+            "Japanese model",
+            asr_model or "No Japanese model configured.",
+        )
+
+        snapshot = capture_snapshot()
+        add("ok", "Free RAM", f"{snapshot.free_ram_mb} MB free")
+        add("ok", "Free VRAM", f"{snapshot.gpu_free_mb or 0} MB free")
+
+        worst = "ok"
+        if any(item["status"] == "error" for item in checks):
+            worst = "error"
+        elif any(item["status"] == "warning" for item in checks):
+            worst = "warning"
+        summary = {
+            "ok": "Everything looks ready for a subtitle run.",
+            "warning": "The setup mostly works, but a few things need attention.",
+            "error": "The setup is not fully ready yet.",
+        }[worst]
+        return {"status": worst, "summary": summary, "checks": checks}
 
     def _run_job(self, job_dir: Path, manifest: JobManifest) -> None:
         profile = self._require_profile(manifest.profile)
@@ -554,9 +773,36 @@ class WorkerService:
             self._handle_stage_failure(job_dir, manifest, exc)
 
     def _job_start_min_free_ram(self, manifest: JobManifest, profile) -> int:
+        if self._is_translation_resume(manifest):
+            return profile.min_free_ram_translation_resume_mb
         if manifest.checkpoint(STAGE_TRANSCRIBE).status == "completed":
             return profile.min_free_ram_translation_mb
         return profile.min_free_ram_mb
+
+    def _is_translation_resume(self, manifest: JobManifest) -> bool:
+        if manifest.checkpoint(STAGE_TRANSCRIBE).status != "completed":
+            return False
+        for stage_name in (STAGE_LITERAL, STAGE_ADAPTED):
+            checkpoint = manifest.checkpoint(stage_name)
+            if checkpoint.attempts > 0:
+                return True
+            if int(checkpoint.details.get("completed_groups", 0) or 0) > 0:
+                return True
+        return False
+
+    def _translation_stage_min_free_ram(self, manifest: JobManifest, profile, stage_name: str) -> int:
+        checkpoint = manifest.checkpoint(stage_name)
+        if checkpoint.attempts > 0 or int(checkpoint.details.get("completed_groups", 0) or 0) > 0:
+            return profile.min_free_ram_translation_resume_mb
+        return profile.min_free_ram_translation_mb
+
+    def _effective_group_size(self, manifest: JobManifest, *, adapted: bool) -> int:
+        profile = self.config.profile(manifest.profile)
+        base = profile.adapted_group_size if adapted else profile.translation_group_size
+        if not manifest.prefer_fast_translation:
+            return base
+        boosted = base + (2 if adapted else 4)
+        return max(boosted, base)
 
     def _require_profile(self, profile_name: str):
         try:
@@ -678,8 +924,9 @@ class WorkerService:
     def _stage_display_text(self, manifest: JobManifest) -> str:
         progress = manifest.current_progress
         base = STAGE_DISPLAY_LABELS.get(manifest.current_stage, manifest.current_stage)
+        model_name = self._current_model_name(manifest)
         if progress is None or progress.stage != manifest.current_stage:
-            return base
+            return f"{base} [{model_name}]" if model_name else base
         percent_text = f"{progress.percent:.0f}%"
         eta_text = (
             f" | {format_duration_compact(progress.eta_seconds)} left"
@@ -687,7 +934,46 @@ class WorkerService:
             else ""
         )
         message_text = f" | {progress.message}" if progress.message else ""
-        return f"{base} ({percent_text}{eta_text}{message_text})"
+        model_text = f" | {model_name}" if model_name else ""
+        return f"{base} ({percent_text}{eta_text}{message_text}{model_text})"
+
+    def _current_model_name(self, manifest: JobManifest) -> str:
+        if manifest.current_stage == STAGE_TRANSCRIBE:
+            if self._asr_engine() == ASR_ENGINE_FASTER_WHISPER:
+                return f"faster-whisper:{self._faster_whisper_profile_name()}"
+            return self.config.models.asr
+        if manifest.current_stage == STAGE_LITERAL:
+            return self.config.models.literal_translation
+        if manifest.current_stage == STAGE_ADAPTED:
+            return self.config.models.adapted_translation
+        return ""
+
+    def _append_event(
+        self,
+        manifest: JobManifest,
+        level: str,
+        message: str,
+        *,
+        stage: str | None = None,
+    ) -> None:
+        manifest.events.append(JobEvent(level=level, message=message, stage=stage))
+        if len(manifest.events) > 100:
+            manifest.events = manifest.events[-100:]
+
+    def _drain_ollama_events(self, manifest: JobManifest, *, stage: str | None = None) -> None:
+        if not hasattr(self.ollama, "pop_recent_events"):
+            return
+        try:
+            events = self.ollama.pop_recent_events()
+        except Exception:
+            return
+        for item in events:
+            self._append_event(
+                manifest,
+                str(item.get("level", "info")),
+                str(item.get("message", "")),
+                stage=stage,
+            )
 
     def _save_manifest(self, job_dir: Path, manifest: JobManifest) -> None:
         self._update_metrics(manifest)
@@ -777,6 +1063,19 @@ class WorkerService:
             self._clear_stage_progress(manifest)
             self._save_manifest(job_dir, manifest)
             return
+        if self._asr_engine() == ASR_ENGINE_FASTER_WHISPER:
+            manifest.current_stage = STAGE_EXTRACT
+            checkpoint.attempts += 1
+            duration = self.ffmpeg.probe_duration(Path(manifest.source_path))
+            checkpoint.status = "completed"
+            checkpoint.details = {
+                "mode": "single-audio-pass",
+                "engine": ASR_ENGINE_FASTER_WHISPER,
+                "total_seconds": duration,
+            }
+            self._clear_stage_progress(manifest)
+            self._save_manifest(job_dir, manifest)
+            return
         manifest.current_stage = STAGE_EXTRACT
         checkpoint.attempts += 1
         chunks_dir = job_dir / "chunks"
@@ -832,6 +1131,132 @@ class WorkerService:
         )
         self._save_progress(job_dir, manifest)
 
+    def _asr_engine(self) -> str:
+        engine = getattr(self.config.models, "asr_engine", ASR_ENGINE_FASTER_WHISPER)
+        normalized = str(engine or ASR_ENGINE_FASTER_WHISPER).strip().lower()
+        if normalized in {"faster_whisper", "faster whisper", "whisper"}:
+            return ASR_ENGINE_FASTER_WHISPER
+        if normalized in {"kotoba", "transformers", "kotoba-whisper"}:
+            return ASR_ENGINE_KOTOBA
+        return ASR_ENGINE_FASTER_WHISPER
+
+    def _faster_whisper_profile_name(self) -> str:
+        profile = getattr(self.config.models, "faster_whisper_profile", "auto")
+        return str(profile or "auto").strip() or "auto"
+
+    def _on_fast_asr_audio_progress(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        seconds: float,
+        total_seconds: float,
+    ) -> None:
+        done = min(seconds, total_seconds) if total_seconds > 0 else seconds
+        self._set_stage_progress(
+            manifest,
+            stage=STAGE_TRANSCRIBE,
+            current=done,
+            total=total_seconds or 1.0,
+            unit="seconds",
+            message="Preparing one clean audio track",
+            done_seconds=done if total_seconds > 0 else None,
+            total_seconds=total_seconds or None,
+        )
+        self._save_progress(job_dir, manifest)
+
+    def _run_faster_whisper_transcription(self, job_dir: Path, manifest: JobManifest) -> list[Cue]:
+        checkpoint = manifest.checkpoint(STAGE_TRANSCRIBE)
+        source_path = Path(manifest.source_path)
+        audio_path = job_dir / manifest.artifacts.get("audio", "source.wav")
+        total_seconds = float(manifest.checkpoint(STAGE_EXTRACT).details.get("total_seconds") or 0.0)
+        if total_seconds <= 0:
+            total_seconds = self.ffmpeg.probe_duration(source_path)
+
+        if not audio_path.exists():
+            self._set_stage_progress(
+                manifest,
+                stage=STAGE_TRANSCRIBE,
+                current=0.0,
+                total=total_seconds or 1.0,
+                unit="seconds",
+                message="Preparing one clean audio track",
+                done_seconds=0.0,
+                total_seconds=total_seconds or None,
+            )
+            self._save_progress(job_dir, manifest, force=True)
+            self.ffmpeg.extract_audio(
+                source_path=source_path,
+                audio_path=audio_path,
+                progress_callback=lambda seconds: self._on_fast_asr_audio_progress(
+                    job_dir,
+                    manifest,
+                    seconds,
+                    total_seconds,
+                ),
+            )
+
+        snapshot = capture_snapshot()
+        candidates, selection_note = ordered_profile_candidates(
+            snapshot,
+            self._faster_whisper_profile_name(),
+            "downgrade",
+        )
+        last_error: Exception | None = None
+        for profile in candidates:
+            backend = FasterWhisperBackend(
+                profile,
+                cache_dir=self.config.cache_paths.hf_hub_cache or None,
+            )
+            try:
+                self._set_stage_progress(
+                    manifest,
+                    stage=STAGE_TRANSCRIBE,
+                    current=0.0,
+                    total=total_seconds or 1.0,
+                    unit="seconds",
+                    message=f"Listening with {profile.name}",
+                    done_seconds=0.0,
+                    total_seconds=total_seconds or None,
+                )
+                self._save_progress(job_dir, manifest, force=True)
+                cues, metadata = backend.transcribe(audio_path, language="ja")
+                checkpoint.details.update(
+                    {
+                        "mode": "single-audio-pass",
+                        "engine": ASR_ENGINE_FASTER_WHISPER,
+                        "requested_profile": self._faster_whisper_profile_name(),
+                        "chosen_profile": profile.name,
+                        "selection_note": selection_note,
+                        "model_id": profile.model_id,
+                        "device": profile.device,
+                        "compute_type": profile.compute_type,
+                        "batch_size": profile.batch_size,
+                        "beam_size": profile.beam_size,
+                        "detected_language": metadata.get("detected_language"),
+                        "language_probability": metadata.get("language_probability"),
+                        "duration_seconds": metadata.get("duration") or total_seconds,
+                    }
+                )
+                self._set_stage_progress(
+                    manifest,
+                    stage=STAGE_TRANSCRIBE,
+                    current=total_seconds or 1.0,
+                    total=total_seconds or 1.0,
+                    unit="seconds",
+                    message=f"Finished with {profile.name}",
+                    done_seconds=total_seconds or None,
+                    total_seconds=total_seconds or None,
+                )
+                self._save_progress(job_dir, manifest)
+                return cues
+            except Exception as exc:
+                last_error = exc
+                if not _is_memory_failure(exc):
+                    raise
+            finally:
+                backend.close()
+        raise RuntimeError("All faster-whisper profiles failed.") from last_error
+
     def _stage_transcribe(self, job_dir: Path, manifest: JobManifest) -> None:
         checkpoint = manifest.checkpoint(STAGE_TRANSCRIBE)
         if checkpoint.status == "completed":
@@ -844,6 +1269,12 @@ class WorkerService:
                 "mode": "imported-subtitles",
                 "source_role": manifest.translation_source_role,
             }
+            self._append_event(
+                manifest,
+                "info",
+                "Skipped Japanese listening because subtitle text was already imported.",
+                stage=STAGE_TRANSCRIBE,
+            )
             self._clear_stage_progress(manifest)
             self._save_manifest(job_dir, manifest)
             return
@@ -851,6 +1282,15 @@ class WorkerService:
 
         manifest.current_stage = STAGE_TRANSCRIBE
         checkpoint.attempts += 1
+        if self._asr_engine() == ASR_ENGINE_FASTER_WHISPER:
+            cues = self._run_faster_whisper_transcription(job_dir, manifest)
+            normalized = normalize_japanese_cues(cues)
+            self._persist_partial_japanese_outputs(job_dir, manifest, normalized)
+            self._detect_tail_gap(manifest, normalized)
+            checkpoint.status = "completed"
+            self._clear_stage_progress(manifest)
+            self._save_manifest(job_dir, manifest)
+            return
         profile = self.config.profile(manifest.profile)
         device = choose_device(profile.min_free_vram_mb)
         if device == "cuda":
@@ -937,6 +1377,7 @@ class WorkerService:
         merged = combine_chunk_cues(all_chunk_cues)
         normalized = normalize_japanese_cues(merged)
         self._persist_partial_japanese_outputs(job_dir, manifest, normalized)
+        self._detect_tail_gap(manifest, normalized)
         checkpoint.status = "completed"
         self._clear_stage_progress(manifest)
         self._save_manifest(job_dir, manifest)
@@ -1051,16 +1492,19 @@ class WorkerService:
             adapted=adapted,
         )
         try:
+            result = self._run_translation_prompt(
+                model_name,
+                prompt,
+                len(group),
+                adapted=adapted,
+            )
+            self._drain_ollama_events(manifest, stage=stage_name)
             return (
-                self._run_translation_prompt(
-                    model_name,
-                    prompt,
-                    len(group),
-                    adapted=adapted,
-                ),
+                result,
                 None,
             )
         except Exception as exc:
+            self._drain_ollama_events(manifest, stage=stage_name)
             if len(group) <= 1:
                 raise
             midpoint = max(len(group) // 2, 1)
@@ -1120,7 +1564,18 @@ class WorkerService:
         manifest.current_stage = stage_name
         checkpoint.attempts += 1
         profile = self.config.profile(manifest.profile)
-        ensure_safe_to_start_job(profile.min_free_ram_translation_mb, profile.max_rss_mb)
+        ensure_safe_to_start_job(
+            self._translation_stage_min_free_ram(manifest, profile, stage_name),
+            profile.max_rss_mb,
+        )
+        if checkpoint.attempts == 1:
+            speed_label = "faster batches" if manifest.prefer_fast_translation else "safe batches"
+            self._append_event(
+                manifest,
+                "info",
+                f"Started {STAGE_DISPLAY_LABELS.get(stage_name, stage_name).lower()} with {model_name} using {speed_label}.",
+                stage=stage_name,
+            )
 
         source_path = source_cues_path or self._translation_source_path(job_dir, manifest)
         literal_source_path = literal_input_path or (job_dir / manifest.artifacts["literal_cues"])
@@ -1193,6 +1648,12 @@ class WorkerService:
                             detail=recovery_note,
                         )
                     )
+                    self._append_event(
+                        manifest,
+                        "warning",
+                        recovery_note,
+                        stage=stage_name,
+                    )
                 translated_cues.extend(apply_translations(group, translations))
 
             checkpoint.details["completed_groups"] = group_index + 1
@@ -1227,6 +1688,12 @@ class WorkerService:
         )
         self._remove_partial_translation_srt(job_dir, manifest, output_srt_artifact)
         checkpoint.status = "completed"
+        self._append_event(
+            manifest,
+            "info",
+            f"Finished {STAGE_DISPLAY_LABELS.get(stage_name, stage_name).lower()}.",
+            stage=stage_name,
+        )
         self._clear_stage_progress(manifest)
         self._save_manifest(job_dir, manifest)
         partial_output_path.unlink(missing_ok=True)
@@ -1236,6 +1703,7 @@ class WorkerService:
         job_dir: Path,
         manifest: JobManifest,
         *,
+        source_cues_path: Path | None = None,
         output_cues_path: Path | None = None,
         output_srt_path: Path | None = None,
         partial_path: Path | None = None,
@@ -1247,8 +1715,9 @@ class WorkerService:
             model_name=self.config.models.literal_translation,
             output_artifact="literal_cues",
             output_srt_artifact="literal_srt",
-            group_size=self.config.profile(manifest.profile).translation_group_size,
+            group_size=self._effective_group_size(manifest, adapted=False),
             adapted=False,
+            source_cues_path=source_cues_path,
             output_cues_path=output_cues_path,
             output_srt_path=output_srt_path,
             partial_path=partial_path,
@@ -1264,6 +1733,7 @@ class WorkerService:
         job_dir: Path,
         manifest: JobManifest,
         *,
+        source_cues_path: Path | None = None,
         literal_input_path: Path | None = None,
         output_cues_path: Path | None = None,
         output_srt_path: Path | None = None,
@@ -1271,6 +1741,12 @@ class WorkerService:
     ) -> None:
         if not manifest.include_adapted_english:
             self._mark_adapted_stage_skipped(manifest)
+            self._append_event(
+                manifest,
+                "info",
+                "Skipped easy English because this job is set to direct English only.",
+                stage=STAGE_ADAPTED,
+            )
             self._clear_stage_progress(manifest)
             self._save_manifest(job_dir, manifest)
             return
@@ -1281,8 +1757,9 @@ class WorkerService:
             model_name=self.config.models.adapted_translation,
             output_artifact="adapted_cues",
             output_srt_artifact="adapted_srt",
-            group_size=self.config.profile(manifest.profile).adapted_group_size,
+            group_size=self._effective_group_size(manifest, adapted=True),
             adapted=True,
+            source_cues_path=source_cues_path,
             literal_input_path=literal_input_path,
             output_cues_path=output_cues_path,
             output_srt_path=output_srt_path,
@@ -1327,6 +1804,12 @@ class WorkerService:
     def _handle_stage_failure(self, job_dir: Path, manifest: JobManifest, exc: Exception) -> None:
         checkpoint = manifest.checkpoint(manifest.current_stage)
         detail = f"{type(exc).__name__}: {exc}"
+        self._append_event(
+            manifest,
+            "error",
+            detail,
+            stage=manifest.current_stage,
+        )
         if checkpoint.attempts >= 2:
             self.store.mark_failed(job_dir, manifest, detail)
             raise QueueError(detail)
@@ -1455,6 +1938,12 @@ class WorkerService:
     def _rebuild_english_transactional(self, job_dir: Path, manifest: JobManifest) -> None:
         profile = self._require_profile(manifest.profile)
         ensure_safe_to_start_job(profile.min_free_ram_translation_mb, profile.max_rss_mb)
+        self._append_event(
+            manifest,
+            "info",
+            "Started redo English for the whole job.",
+            stage=STAGE_LITERAL,
+        )
 
         temp_paths = self._rebuild_temp_paths(job_dir, manifest)
         original_manifest = JobManifest.from_dict(manifest.to_dict())
@@ -1507,10 +1996,17 @@ class WorkerService:
             finalize_checkpoint = manifest.checkpoint(STAGE_FINALIZE)
             finalize_checkpoint.status = "completed"
             finalize_checkpoint.details = {"export_dir": str(output_dir)}
+            self._append_event(
+                manifest,
+                "info",
+                "Finished redo English for the whole job.",
+                stage=STAGE_FINALIZE,
+            )
             self._save_manifest(job_dir, manifest)
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
             original_manifest.error = detail
+            self._append_event(original_manifest, "error", detail, stage=original_manifest.current_stage)
             self._save_manifest(job_dir, original_manifest)
             raise QueueError(detail) from exc
         finally:
@@ -1648,3 +2144,193 @@ class WorkerService:
             self._cue_cache.pop(local_path.resolve(), None)
             export_path = self._output_dir_for_manifest(manifest) / manifest.artifacts[artifact]
             export_path.unlink(missing_ok=True)
+
+    def _role_display_name(self, role: str) -> str:
+        return {
+            "ja": "Japanese",
+            "direct": "Direct English",
+            "easy": "Easy English",
+            "reference": "Reference",
+        }.get(role, role)
+
+    def _detect_tail_gap(self, manifest: JobManifest, cues: list[Cue], *, threshold_seconds: float = 15.0) -> None:
+        if not manifest.chunk_plan or not cues:
+            return
+        total_seconds = max((chunk.end for chunk in manifest.chunk_plan), default=0.0)
+        last_end = max((cue.end for cue in cues), default=0.0)
+        gap = max(total_seconds - last_end, 0.0)
+        if gap < threshold_seconds:
+            return
+        detail = (
+            f"The Japanese subtitles end around {format_timecode(last_end)}, but the video reaches about "
+            f"{format_timecode(total_seconds)}. Check the missing tail section."
+        )
+        if not any(flag.reason == "tail-gap" for flag in manifest.review_flags):
+            manifest.review_flags.append(
+                ReviewFlag(
+                    stage=STAGE_TRANSCRIBE,
+                    group_index=0,
+                    reason="tail-gap",
+                    detail=detail,
+                )
+            )
+        self._append_event(manifest, "warning", detail, stage=STAGE_TRANSCRIBE)
+
+    def _selected_range_indexes(self, source_cues: list[Cue], start_seconds: float, end_seconds: float) -> set[int]:
+        return {
+            cue.index
+            for cue in source_cues
+            if cue.end >= start_seconds and cue.start <= end_seconds
+        }
+
+    def _merge_cue_updates(
+        self,
+        base_cues: list[Cue],
+        updates: list[Cue],
+        *,
+        allowed_indexes: set[int],
+    ) -> list[Cue]:
+        update_map = {cue.index: cue for cue in updates}
+        merged: list[Cue] = []
+        for cue in base_cues:
+            if cue.index in allowed_indexes and cue.index in update_map:
+                replacement = update_map[cue.index]
+                merged.append(
+                    Cue(
+                        index=cue.index,
+                        start=cue.start,
+                        end=cue.end,
+                        text=replacement.text,
+                    )
+                )
+            else:
+                merged.append(Cue(index=cue.index, start=cue.start, end=cue.end, text=cue.text))
+        return merged
+
+    def _copy_existing_translation_or_raise(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        artifact_key: str,
+        *,
+        label: str,
+    ) -> list[Cue]:
+        path = job_dir / manifest.artifacts[artifact_key]
+        if not path.exists():
+            raise QueueError(f"{label} is not ready yet, so only a whole-job English rebuild is possible.")
+        return self._load_cues_cached(path)
+
+    def _rebuild_english_range_transactional(
+        self,
+        job_dir: Path,
+        manifest: JobManifest,
+        start_seconds: float,
+        end_seconds: float,
+    ) -> None:
+        profile = self._require_profile(manifest.profile)
+        ensure_safe_to_start_job(
+            self._translation_stage_min_free_ram(manifest, profile, STAGE_LITERAL),
+            profile.max_rss_mb,
+        )
+        source_path = self._translation_source_path(job_dir, manifest)
+        source_cues = self._load_cues_cached(source_path)
+        selected_indexes = self._selected_range_indexes(source_cues, start_seconds, end_seconds)
+        if not selected_indexes:
+            raise QueueError("No subtitle lines overlap that selected time range.")
+
+        subset_source = [cue for cue in source_cues if cue.index in selected_indexes]
+        temp_dir = job_dir / "range-rebuild"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_source = temp_dir / "source.cues.json"
+        self._save_cues_and_cache(temp_source, subset_source)
+
+        temp_paths = {
+            "literal_cues": temp_dir / "literal.cues.json",
+            "literal_srt": temp_dir / "literal.srt",
+            "literal_partial": temp_dir / "literal.partial.json",
+            "adapted_cues": temp_dir / "adapted.cues.json",
+            "adapted_srt": temp_dir / "adapted.srt",
+            "adapted_partial": temp_dir / "adapted.partial.json",
+            "review": temp_dir / "review.json",
+        }
+        self._cleanup_paths(temp_paths.values())
+        self._append_event(
+            manifest,
+            "info",
+            f"Redoing English only for {format_timecode(start_seconds)} to {format_timecode(end_seconds)}.",
+            stage=STAGE_LITERAL,
+        )
+        try:
+            self._stage_translate_literal(
+                job_dir,
+                manifest,
+                output_cues_path=temp_paths["literal_cues"],
+                output_srt_path=temp_paths["literal_srt"],
+                partial_path=temp_paths["literal_partial"],
+                source_cues_path=temp_source,
+            )
+            existing_literal = self._copy_existing_translation_or_raise(
+                job_dir,
+                manifest,
+                "literal_cues",
+                label="Direct English",
+            )
+            merged_literal = self._merge_cue_updates(
+                existing_literal,
+                self._load_cues_cached(temp_paths["literal_cues"]),
+                allowed_indexes=selected_indexes,
+            )
+            literal_cues_path = job_dir / manifest.artifacts["literal_cues"]
+            literal_srt_path = job_dir / manifest.artifacts["literal_srt"]
+            self._save_cues_and_cache(literal_cues_path, merged_literal)
+            write_srt(literal_srt_path, merged_literal)
+            self._export_text_artifact(
+                literal_srt_path,
+                self._ensure_output_dir_for_manifest(manifest) / manifest.artifacts["literal_srt"],
+            )
+
+            if manifest.include_adapted_english:
+                temp_literal_merged = temp_dir / "literal-merged.cues.json"
+                subset_literal = [cue for cue in merged_literal if cue.index in selected_indexes]
+                self._save_cues_and_cache(temp_literal_merged, subset_literal)
+                self._stage_translate_adapted(
+                    job_dir,
+                    manifest,
+                    literal_input_path=temp_literal_merged,
+                    output_cues_path=temp_paths["adapted_cues"],
+                    output_srt_path=temp_paths["adapted_srt"],
+                    partial_path=temp_paths["adapted_partial"],
+                    source_cues_path=temp_source,
+                )
+                existing_adapted = self._copy_existing_translation_or_raise(
+                    job_dir,
+                    manifest,
+                    "adapted_cues",
+                    label="Easy English",
+                )
+                merged_adapted = self._merge_cue_updates(
+                    existing_adapted,
+                    self._load_cues_cached(temp_paths["adapted_cues"]),
+                    allowed_indexes=selected_indexes,
+                )
+                adapted_cues_path = job_dir / manifest.artifacts["adapted_cues"]
+                adapted_srt_path = job_dir / manifest.artifacts["adapted_srt"]
+                self._save_cues_and_cache(adapted_cues_path, merged_adapted)
+                write_srt(adapted_srt_path, merged_adapted)
+                self._export_text_artifact(
+                    adapted_srt_path,
+                    self._ensure_output_dir_for_manifest(manifest) / manifest.artifacts["adapted_srt"],
+                )
+
+            self._append_event(
+                manifest,
+                "info",
+                f"Finished redo English for {format_timecode(start_seconds)} to {format_timecode(end_seconds)}.",
+                stage=STAGE_FINALIZE,
+            )
+            self._save_manifest(job_dir, manifest)
+        finally:
+            self._cleanup_paths(temp_paths.values())
+            for extra_path in (temp_source, temp_dir / "literal-merged.cues.json"):
+                extra_path.unlink(missing_ok=True)
+            temp_dir.rmdir() if temp_dir.exists() and not any(temp_dir.iterdir()) else None

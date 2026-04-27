@@ -137,6 +137,7 @@ class FakeService:
         overall_context: str | None,
         scene_contexts: list[SceneContextBlock],
         include_adapted_english: bool | None = None,
+        prefer_fast_translation: bool | None = None,
     ) -> JobManifest:
         manifest = self.manifests[job_id]
         manifest.series = batch_label or None
@@ -151,6 +152,7 @@ class FakeService:
                 "overall_context": overall_context,
                 "scene_contexts": list(scene_contexts),
                 "include_adapted_english": include_adapted_english,
+                "prefer_fast_translation": prefer_fast_translation,
             }
         )
         return manifest

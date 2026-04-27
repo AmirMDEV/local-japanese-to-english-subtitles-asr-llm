@@ -6,6 +6,7 @@ import threading
 import tkinter as tk
 import webbrowser
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -65,6 +66,22 @@ PREVIEW_COLUMN_MIN_WIDTH = {
 }
 
 DONATE_URL = "https://www.paypal.com/donate/?hosted_button_id=2U2GXSKFJKJCA"
+
+ASR_ENGINE_LABELS = {
+    "kotoba": "Kotoba Japanese quality (recommended)",
+    "faster-whisper": "Fast local Whisper",
+}
+ASR_ENGINE_KEYS_BY_LABEL = {label: key for key, label in ASR_ENGINE_LABELS.items()}
+FASTER_WHISPER_PROFILE_LABELS = {
+    "auto": "Auto choose best fit",
+    "high": "Highest accuracy GPU",
+    "balanced": "Balanced GPU",
+    "low_gpu": "Low VRAM GPU",
+    "cpu_fallback": "CPU fallback",
+}
+FASTER_WHISPER_PROFILE_KEYS_BY_LABEL = {
+    label: key for key, label in FASTER_WHISPER_PROFILE_LABELS.items()
+}
 
 
 @dataclass(slots=True)
@@ -143,6 +160,7 @@ class JobEditorDraft:
     marked_start_cue_index: int | None = None
     marked_end_cue_index: int | None = None
     include_adapted_english: bool = True
+    prefer_fast_translation: bool = False
 
 
 class ImportExistingDialog(tk.Toplevel):
@@ -373,6 +391,7 @@ class SubtitleStackApp(tk.Tk):
         self.worker_process: subprocess.Popen[str] | None = None
         self.rebuild_process: subprocess.Popen[str] | None = None
         self.rebuild_job_id: str | None = None
+        self.rebuild_scope_label: str = "English subtitles"
         self.rebuild_poll_job: str | None = None
         self.refresh_job: str | None = None
         self.snapshot_lock = threading.Lock()
@@ -396,6 +415,23 @@ class SubtitleStackApp(tk.Tk):
 
         self.profile_var = tk.StringVar(value=PROFILE_LABELS.get("conservative", "Safe and steady (recommended)"))
         self.include_adapted_english_var = tk.BooleanVar(value=True)
+        self.prefer_fast_translation_var = tk.BooleanVar(value=False)
+        self.asr_engine_var = tk.StringVar(
+            value=ASR_ENGINE_LABELS.get(
+                getattr(self.service.config.models, "asr_engine", self.default_model_config.asr_engine),
+                ASR_ENGINE_LABELS[self.default_model_config.asr_engine],
+            )
+        )
+        self.faster_whisper_profile_var = tk.StringVar(
+            value=FASTER_WHISPER_PROFILE_LABELS.get(
+                getattr(
+                    self.service.config.models,
+                    "faster_whisper_profile",
+                    self.default_model_config.faster_whisper_profile,
+                ),
+                FASTER_WHISPER_PROFILE_LABELS[self.default_model_config.faster_whisper_profile],
+            )
+        )
         self.asr_model_var = tk.StringVar(value=self.service.config.models.asr)
         self.literal_model_var = tk.StringVar(value=self.service.config.models.literal_translation)
         self.adapted_model_var = tk.StringVar(value=self.service.config.models.adapted_translation)
@@ -412,6 +448,7 @@ class SubtitleStackApp(tk.Tk):
         self.selected_overall_progress_var = tk.DoubleVar(value=0.0)
         self.selected_stage_progress_text_var = tk.StringVar(value="This step: waiting")
         self.selected_overall_progress_text_var = tk.StringVar(value="Whole job: 0% done")
+        self.event_banner_var = tk.StringVar(value="No recovery notes yet.")
         self.marked_range_var = tk.StringVar(value="Marked range: none")
         self.line_editor_time_var = tk.StringVar(value="")
         self.line_editor_status_var = tk.StringVar(value="Click one subtitle line to edit it here.")
@@ -488,8 +525,13 @@ class SubtitleStackApp(tk.Tk):
         profile_box.pack(side=tk.LEFT, padx=(8, 16))
         ttk.Checkbutton(
             action_bar,
-            text="Also make easy English",
+            text="Also make easy English now",
             variable=self.include_adapted_english_var,
+        ).pack(side=tk.LEFT, padx=(0, 16))
+        ttk.Checkbutton(
+            action_bar,
+            text="Try faster English batches",
+            variable=self.prefer_fast_translation_var,
         ).pack(side=tk.LEFT, padx=(0, 16))
 
         ttk.Button(action_bar, text="Add video files", command=self.enqueue_files, style="Primary.TButton").pack(
@@ -503,6 +545,11 @@ class SubtitleStackApp(tk.Tk):
             action_bar,
             text="Import existing subtitles",
             command=self.import_existing_subtitles,
+        ).pack(side=tk.LEFT, padx=6)
+        ttk.Button(
+            action_bar,
+            text="Check setup",
+            command=self.run_health_check,
         ).pack(side=tk.LEFT, padx=6)
         self.start_processing_button = ttk.Button(
             action_bar,
@@ -539,7 +586,8 @@ class SubtitleStackApp(tk.Tk):
             text=(
                 "Speed mode helps your laptop stay comfortable. "
                 "Safe and steady is best when other apps are open. "
-                "Turn off easy English if you only want Japanese plus direct English."
+                "Turn off easy English if you only want Japanese plus direct English. "
+                "Turn on faster English batches if you want speed more than extra caution."
             ),
             style="Hint.TLabel",
             wraplength=1300,
@@ -612,35 +660,58 @@ class SubtitleStackApp(tk.Tk):
         ttk.Label(
             inner,
             text=(
-                "These are app-wide defaults. The Japanese model can be a Hugging Face name or a local folder. "
-                "The English models are Ollama model names."
+                "These are app-wide defaults. Kotoba is the quality-first Japanese ASR path. "
+                "Fast local Whisper is available for rougher speed-first runs. English models are Ollama model names."
             ),
             style="Hint.TLabel",
             wraplength=1250,
         ).grid(row=0, column=0, columnspan=4, sticky=tk.W, pady=(0, 10))
 
-        ttk.Label(inner, text="Japanese model").grid(row=1, column=0, sticky=tk.W)
-        ttk.Entry(inner, textvariable=self.asr_model_var).grid(row=1, column=1, sticky="ew", padx=(8, 8))
-        ttk.Button(inner, text="Pick folder", command=self.choose_asr_model_folder).grid(row=1, column=2, sticky=tk.W)
+        ttk.Label(inner, text="Japanese listening engine").grid(row=1, column=0, sticky=tk.W)
+        ttk.Combobox(
+            inner,
+            textvariable=self.asr_engine_var,
+            values=list(ASR_ENGINE_KEYS_BY_LABEL.keys()),
+            state="readonly",
+            width=34,
+        ).grid(row=1, column=1, sticky=tk.W, padx=(8, 8))
 
-        ttk.Label(inner, text="Direct English model").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Label(inner, text="Whisper speed profile").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Combobox(
+            inner,
+            textvariable=self.faster_whisper_profile_var,
+            values=list(FASTER_WHISPER_PROFILE_KEYS_BY_LABEL.keys()),
+            state="readonly",
+            width=34,
+        ).grid(row=2, column=1, sticky=tk.W, padx=(8, 8), pady=(8, 0))
+
+        ttk.Label(inner, text="Kotoba Japanese model").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Entry(inner, textvariable=self.asr_model_var).grid(row=3, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
+        ttk.Button(inner, text="Pick folder", command=self.choose_asr_model_folder).grid(
+            row=3,
+            column=2,
+            sticky=tk.W,
+            pady=(8, 0),
+        )
+
+        ttk.Label(inner, text="Direct English model").grid(row=4, column=0, sticky=tk.W, pady=(8, 0))
         ttk.Entry(inner, textvariable=self.literal_model_var).grid(
-            row=2,
+            row=4,
             column=1,
             sticky="ew",
             padx=(8, 8),
             pady=(8, 0),
         )
         ttk.Label(inner, text="Example: qwen3:4b-q8_0", style="Hint.TLabel").grid(
-            row=2,
+            row=4,
             column=2,
             sticky=tk.W,
             pady=(8, 0),
         )
 
-        ttk.Label(inner, text="Natural English model").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Label(inner, text="Natural English model").grid(row=5, column=0, sticky=tk.W, pady=(8, 0))
         ttk.Entry(inner, textvariable=self.adapted_model_var).grid(
-            row=3,
+            row=5,
             column=1,
             sticky="ew",
             padx=(8, 8),
@@ -650,25 +721,25 @@ class SubtitleStackApp(tk.Tk):
             inner,
             text="Used when you press Redo English or run a full job.",
             style="Hint.TLabel",
-        ).grid(row=3, column=2, sticky=tk.W, pady=(8, 0))
+        ).grid(row=5, column=2, sticky=tk.W, pady=(8, 0))
 
-        ttk.Label(inner, text="Japanese model cache folder").grid(row=4, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Label(inner, text="Model cache folder").grid(row=6, column=0, sticky=tk.W, pady=(8, 0))
         ttk.Entry(inner, textvariable=self.hf_cache_var).grid(
-            row=4,
+            row=6,
             column=1,
             sticky="ew",
             padx=(8, 8),
             pady=(8, 0),
         )
         ttk.Button(inner, text="Pick folder", command=self.choose_hf_cache_folder).grid(
-            row=4,
+            row=6,
             column=2,
             sticky=tk.W,
             pady=(8, 0),
         )
 
         buttons = ttk.Frame(inner)
-        buttons.grid(row=5, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
+        buttons.grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
         ttk.Button(buttons, text="Save model settings", command=self.save_model_settings).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Use recommended defaults", command=self.reset_model_settings_defaults).pack(
             side=tk.LEFT,
@@ -678,12 +749,12 @@ class SubtitleStackApp(tk.Tk):
         ttk.Label(
             inner,
             text=(
-                "Leave the cache folder blank to use the normal Hugging Face cache location. "
+                "Leave the cache folder blank to use the normal model cache location. "
                 "Saving here updates future runs and English rebuilds."
             ),
             style="Hint.TLabel",
             wraplength=1250,
-        ).grid(row=6, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
+        ).grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
 
     def _build_right_panel(self, parent: ttk.Frame) -> None:
         selected_frame = ttk.LabelFrame(parent, text="Selected job", style="Section.TLabelframe")
@@ -693,6 +764,17 @@ class SubtitleStackApp(tk.Tk):
         top.pack(fill=tk.X)
         ttk.Label(top, textvariable=self.selected_file_var, font=("Segoe UI", 11, "bold")).pack(anchor=tk.W)
         ttk.Label(top, textvariable=self.selected_job_state_var, style="Hint.TLabel").pack(anchor=tk.W, pady=(2, 10))
+        self.event_banner_label = tk.Label(
+            top,
+            textvariable=self.event_banner_var,
+            anchor="w",
+            justify=tk.LEFT,
+            bg="#EEF3F9",
+            fg="#1E2A36",
+            padx=10,
+            pady=8,
+        )
+        self.event_banner_label.pack(fill=tk.X, pady=(0, 10))
 
         progress_frame = ttk.Frame(top)
         progress_frame.pack(fill=tk.X, pady=(0, 10))
@@ -722,6 +804,18 @@ class SubtitleStackApp(tk.Tk):
             text="Use this only if several videos belong together.",
             style="Hint.TLabel",
         ).grid(row=0, column=2, sticky=tk.W)
+        file_buttons = ttk.Frame(top)
+        file_buttons.pack(fill=tk.X, pady=(10, 0))
+        self.open_ja_file_button = ttk.Button(file_buttons, text="Open Japanese file", command=lambda: self.open_selected_subtitle_file("ja"))
+        self.open_ja_file_button.pack(side=tk.LEFT)
+        self.open_direct_file_button = ttk.Button(file_buttons, text="Open direct English", command=lambda: self.open_selected_subtitle_file("direct"))
+        self.open_direct_file_button.pack(side=tk.LEFT, padx=6)
+        self.open_easy_file_button = ttk.Button(file_buttons, text="Open easy English", command=lambda: self.open_selected_subtitle_file("easy"))
+        self.open_easy_file_button.pack(side=tk.LEFT, padx=6)
+        self.open_direct_partial_button = ttk.Button(file_buttons, text="Open partial direct", command=lambda: self.open_selected_subtitle_file("direct-partial"))
+        self.open_direct_partial_button.pack(side=tk.LEFT, padx=6)
+        self.open_easy_partial_button = ttk.Button(file_buttons, text="Open partial easy", command=lambda: self.open_selected_subtitle_file("easy-partial"))
+        self.open_easy_partial_button.pack(side=tk.LEFT, padx=6)
 
         preview_frame = ttk.LabelFrame(selected_frame, text="Subtitle lines", style="Section.TLabelframe")
         preview_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
@@ -769,6 +863,12 @@ class SubtitleStackApp(tk.Tk):
             command=self.use_selected_lines_for_note_range,
         )
         self.use_highlighted_button.pack(side=tk.LEFT, padx=(0, 6))
+        self.redo_range_button = ttk.Button(
+            preview_actions,
+            text="Redo English for marked range",
+            command=self.redo_english_range_selected,
+        )
+        self.redo_range_button.pack(side=tk.LEFT, padx=(0, 6))
         self.reload_lines_button = ttk.Button(preview_actions, text="Reload lines", command=self.reload_selected_preview)
         self.reload_lines_button.pack(side=tk.LEFT)
 
@@ -856,6 +956,21 @@ class SubtitleStackApp(tk.Tk):
             style="Primary.TButton",
         )
         self.save_line_button.pack(side=tk.LEFT, padx=6)
+        ttk.Button(
+            line_editor_buttons,
+            text="Import direct English into this job",
+            command=lambda: self.attach_existing_track_to_selected_job("direct"),
+        ).pack(side=tk.LEFT, padx=(18, 6))
+        ttk.Button(
+            line_editor_buttons,
+            text="Import easy English into this job",
+            command=lambda: self.attach_existing_track_to_selected_job("easy"),
+        ).pack(side=tk.LEFT, padx=6)
+        ttk.Button(
+            line_editor_buttons,
+            text="Import reference into this job",
+            command=lambda: self.attach_existing_track_to_selected_job("reference"),
+        ).pack(side=tk.LEFT, padx=6)
 
         notes_frame = ttk.LabelFrame(selected_frame, text="Helper notes", style="Section.TLabelframe")
         notes_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 12))
@@ -905,6 +1020,10 @@ class SubtitleStackApp(tk.Tk):
         note_button_row.grid(row=5, column=1, columnspan=3, sticky=tk.W, pady=(10, 10))
         self.add_note_button = ttk.Button(note_button_row, text="Add note", command=self.add_scene_block)
         self.add_note_button.pack(side=tk.LEFT)
+        self.load_note_button = ttk.Button(note_button_row, text="Load selected note", command=self.load_selected_scene_block)
+        self.load_note_button.pack(side=tk.LEFT, padx=6)
+        self.update_note_button = ttk.Button(note_button_row, text="Update selected note", command=self.update_selected_scene_block)
+        self.update_note_button.pack(side=tk.LEFT, padx=6)
         self.remove_note_button = ttk.Button(note_button_row, text="Remove selected note", command=self.remove_scene_block)
         self.remove_note_button.pack(
             side=tk.LEFT,
@@ -928,6 +1047,24 @@ class SubtitleStackApp(tk.Tk):
         note_scroll = ttk.Scrollbar(note_tree_frame, orient=tk.VERTICAL, command=self.note_tree.yview)
         note_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.note_tree.configure(yscrollcommand=note_scroll.set)
+        self.note_tree.bind("<Double-1>", self._on_note_tree_double_click)
+
+        event_frame = ttk.LabelFrame(selected_frame, text="Recovery and event log", style="Section.TLabelframe")
+        event_frame.pack(fill=tk.BOTH, expand=False, padx=12, pady=(0, 12))
+        event_inner = ttk.Frame(event_frame, padding=10)
+        event_inner.pack(fill=tk.BOTH, expand=True)
+        event_columns = ("time", "level", "message")
+        self.event_tree = ttk.Treeview(event_inner, columns=event_columns, show="headings", height=5)
+        self.event_tree.heading("time", text="When")
+        self.event_tree.heading("level", text="Level")
+        self.event_tree.heading("message", text="What happened")
+        self.event_tree.column("time", width=150, anchor=tk.W, stretch=False)
+        self.event_tree.column("level", width=90, anchor=tk.W, stretch=False)
+        self.event_tree.column("message", width=760, anchor=tk.W)
+        self.event_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        event_scroll = ttk.Scrollbar(event_inner, orient=tk.VERTICAL, command=self.event_tree.yview)
+        event_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.event_tree.configure(yscrollcommand=event_scroll.set)
 
         bottom_actions = ttk.Frame(selected_frame, padding=(12, 0, 12, 12))
         bottom_actions.pack(fill=tk.X)
@@ -965,6 +1102,7 @@ class SubtitleStackApp(tk.Tk):
                 context=self._context_value(),
                 scene_contexts=self._scene_contexts_copy(),
                 include_adapted_english=self.include_adapted_english_var.get(),
+                prefer_fast_translation=self.prefer_fast_translation_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Add video files", str(exc))
@@ -988,6 +1126,7 @@ class SubtitleStackApp(tk.Tk):
                 scene_contexts=self._scene_contexts_copy(),
                 recursive=self.recursive_var.get(),
                 include_adapted_english=self.include_adapted_english_var.get(),
+                prefer_fast_translation=self.prefer_fast_translation_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Add a folder", str(exc))
@@ -1018,6 +1157,7 @@ class SubtitleStackApp(tk.Tk):
                 context=self._context_value(),
                 scene_contexts=self._scene_contexts_copy(),
                 include_adapted_english=self.include_adapted_english_var.get(),
+                prefer_fast_translation=self.prefer_fast_translation_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Import existing subtitles", str(exc))
@@ -1038,6 +1178,14 @@ class SubtitleStackApp(tk.Tk):
             self.hf_cache_var.set(folder)
 
     def save_model_settings(self) -> None:
+        self.service.config.models.asr_engine = ASR_ENGINE_KEYS_BY_LABEL.get(
+            self.asr_engine_var.get(),
+            self.default_model_config.asr_engine,
+        )
+        self.service.config.models.faster_whisper_profile = FASTER_WHISPER_PROFILE_KEYS_BY_LABEL.get(
+            self.faster_whisper_profile_var.get(),
+            self.default_model_config.faster_whisper_profile,
+        )
         self.service.config.models.asr = self._normalized_or_default(
             self.asr_model_var.get(),
             self.default_model_config.asr,
@@ -1059,6 +1207,10 @@ class SubtitleStackApp(tk.Tk):
         self.status_var.set("Saved the app-wide model settings")
 
     def reset_model_settings_defaults(self) -> None:
+        self.asr_engine_var.set(ASR_ENGINE_LABELS[self.default_model_config.asr_engine])
+        self.faster_whisper_profile_var.set(
+            FASTER_WHISPER_PROFILE_LABELS[self.default_model_config.faster_whisper_profile]
+        )
         self.asr_model_var.set(self.default_model_config.asr)
         self.literal_model_var.set(self.default_model_config.literal_translation)
         self.adapted_model_var.set(self.default_model_config.adapted_translation)
@@ -1124,6 +1276,7 @@ class SubtitleStackApp(tk.Tk):
                 overall_context=self._context_value(),
                 scene_contexts=self._scene_contexts_copy(),
                 include_adapted_english=self.include_adapted_english_var.get(),
+                prefer_fast_translation=self.prefer_fast_translation_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Save notes", str(exc))
@@ -1149,6 +1302,7 @@ class SubtitleStackApp(tk.Tk):
                 overall_context=self._context_value(),
                 scene_contexts=self._scene_contexts_copy(),
                 include_adapted_english=self.include_adapted_english_var.get(),
+                prefer_fast_translation=self.prefer_fast_translation_var.get(),
             )
         except QueueError as exc:
             messagebox.showerror("Redo English", str(exc))
@@ -1163,8 +1317,60 @@ class SubtitleStackApp(tk.Tk):
             creationflags=no_window_creationflags(),
         )
         self.rebuild_job_id = selected
+        self.rebuild_scope_label = "English subtitles"
         self._set_rebuild_controls_enabled(False)
         self.status_var.set("Redoing the English subtitles in the background")
+        self._poll_rebuild_process()
+
+    def redo_english_range_selected(self) -> None:
+        selected = self._selected_job_id()
+        if not selected:
+            messagebox.showinfo("Redo selected range", "Click a job on the left first.")
+            return
+        if self.rebuild_process and self.rebuild_process.poll() is None:
+            messagebox.showinfo("Redo selected range", "Redo English is already running for another job.")
+            return
+        if self.worker_process and self.worker_process.poll() is None:
+            messagebox.showinfo("Redo selected range", "Stop the full queue first, then try again.")
+            return
+        try:
+            start_text, end_text = self._selected_range_for_rebuild()
+        except ValueError as exc:
+            messagebox.showerror("Redo selected range", str(exc))
+            return
+        self._store_editor_draft(selected)
+        try:
+            self.service.save_job_notes(
+                selected,
+                batch_label=self._batch_label_value(),
+                overall_context=self._context_value(),
+                scene_contexts=self._scene_contexts_copy(),
+                include_adapted_english=self.include_adapted_english_var.get(),
+                prefer_fast_translation=self.prefer_fast_translation_var.get(),
+            )
+        except QueueError as exc:
+            messagebox.showerror("Redo selected range", str(exc))
+            return
+        command = self._launch_command(
+            "rebuild-english-range",
+            selected,
+            "--start",
+            start_text,
+            "--end",
+            end_text,
+        )
+        self.rebuild_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+            creationflags=no_window_creationflags(),
+        )
+        self.rebuild_job_id = selected
+        self.rebuild_scope_label = f"English subtitles for {start_text} to {end_text}"
+        self._set_rebuild_controls_enabled(False)
+        self.status_var.set(f"Redoing English for {start_text} to {end_text}")
         self._poll_rebuild_process()
 
     def open_review_selected(self) -> None:
@@ -1186,6 +1392,24 @@ class SubtitleStackApp(tk.Tk):
             self.service.open_output_folder(selected)
         except QueueError as exc:
             messagebox.showerror("Open subtitle folder", str(exc))
+
+    def open_selected_subtitle_file(self, kind: str) -> None:
+        selected = self._selected_job_id()
+        if not selected:
+            messagebox.showinfo("Open subtitle file", "Click a job on the left first.")
+            return
+        try:
+            self.service.open_subtitle_file(selected, kind)
+        except QueueError as exc:
+            messagebox.showerror("Open subtitle file", str(exc))
+
+    def run_health_check(self) -> None:
+        report = self.service.health_check()
+        lines = [str(report["summary"]), ""]
+        for item in report["checks"]:
+            lines.append(f"[{item['status'].upper()}] {item['name']}: {item['detail']}")
+        messagebox.showinfo("Check setup", "\n".join(lines))
+        self.status_var.set(str(report["summary"]))
 
     def open_donate_page(self) -> None:
         try:
@@ -1255,6 +1479,68 @@ class SubtitleStackApp(tk.Tk):
         self._store_editor_draft(selected)
         self._load_job_details(selected, force_reload=True)
         self.status_var.set(f"Saved changes for subtitle line {cue_index}")
+
+    def attach_existing_track_to_selected_job(self, role: str) -> None:
+        selected = self._selected_job_id()
+        if not selected:
+            messagebox.showinfo("Import subtitle file", "Click a job on the left first.")
+            return
+        path = filedialog.askopenfilename(
+            title=f"Choose a {role} subtitle file",
+            filetypes=[("SRT Files", "*.srt"), ("All Files", "*.*")],
+            parent=self,
+        )
+        if not path:
+            return
+        try:
+            self.service.attach_existing_subtitle(selected, role=role, subtitle_path=Path(path))
+        except QueueError as exc:
+            messagebox.showerror("Import subtitle file", str(exc))
+            return
+        self.status_var.set(f"Imported {role} subtitle lines into the selected job")
+        self._load_job_details(selected, force_reload=True)
+
+    def load_selected_scene_block(self) -> None:
+        selection = self.note_tree.selection()
+        if not selection:
+            messagebox.showinfo("Load selected note", "Click a note first.")
+            return
+        index = self.note_tree.index(selection[0])
+        block = self.scene_contexts[index]
+        self.note_start_var.set(format_timecode(block.start_seconds))
+        self.note_end_var.set(format_timecode(block.end_seconds))
+        self.range_notes_text.delete("1.0", tk.END)
+        self.range_notes_text.insert("1.0", block.notes)
+        self.range_notes_text.focus_set()
+        self.status_var.set("Loaded the selected helper note into the editor")
+
+    def update_selected_scene_block(self) -> None:
+        selection = self.note_tree.selection()
+        if not selection:
+            messagebox.showinfo("Update selected note", "Click a note first.")
+            return
+        notes = self.range_notes_value()
+        if not notes:
+            messagebox.showinfo("Update selected note", "Type the updated helper note first.")
+            return
+        try:
+            start_seconds, end_seconds = self._selected_range_seconds()
+        except ValueError as exc:
+            messagebox.showerror("Update selected note", str(exc))
+            return
+        index = self.note_tree.index(selection[0])
+        self.scene_contexts[index] = SceneContextBlock(
+            start_seconds=start_seconds,
+            end_seconds=end_seconds,
+            notes=notes,
+        )
+        self.scene_contexts.sort(key=lambda item: (item.start_seconds, item.end_seconds, item.notes))
+        self._render_scene_blocks()
+        self.status_var.set("Updated the selected helper note")
+
+    def _on_note_tree_double_click(self, _event: tk.Event[tk.Misc]) -> str:
+        self.load_selected_scene_block()
+        return "break"
 
     def add_scene_block(self) -> None:
         selected = self._selected_job_id()
@@ -1418,6 +1704,14 @@ class SubtitleStackApp(tk.Tk):
             raise ValueError("The end time must be after the start time.")
         return start_seconds, end_seconds
 
+    def _selected_range_for_rebuild(self) -> tuple[str, str]:
+        start_text = self.note_start_var.get().strip()
+        end_text = self.note_end_var.get().strip()
+        if not start_text or not end_text:
+            raise ValueError("Fill in the From and To boxes, or mark a subtitle range first.")
+        self._selected_range_seconds()
+        return start_text, end_text
+
     def _timecode_to_seconds(self, value: str) -> float:
         try:
             return parse_timecode(value)
@@ -1459,12 +1753,14 @@ class SubtitleStackApp(tk.Tk):
             f"{STAGE_LABELS.get(manifest.current_stage, manifest.current_stage)} | "
             f"Source: {'Video' if manifest.source_kind == 'video' else 'Subtitle-only'} | "
             f"Translation source: {'Japanese' if manifest.translation_source_role == 'ja' else 'Imported Direct English'} | "
-            f"Easy English: {'on' if manifest.include_adapted_english else 'off'}"
+            f"Easy English: {'on' if manifest.include_adapted_english else 'off'} | "
+            f"Fast English: {'on' if manifest.prefer_fast_translation else 'off'}"
             + (" | Reference loaded" if manifest.imported_tracks.get('reference') else "")
         )
         self._apply_selected_job_progress_from_row(status_row)
         self.batch_label_var.set(draft.batch_label)
         self.include_adapted_english_var.set(draft.include_adapted_english)
+        self.prefer_fast_translation_var.set(draft.prefer_fast_translation)
         self.context_text.delete("1.0", tk.END)
         if draft.overall_context:
             self.context_text.insert("1.0", draft.overall_context)
@@ -1482,6 +1778,7 @@ class SubtitleStackApp(tk.Tk):
             for block in draft.scene_contexts
         ]
         self._render_scene_blocks()
+        self._render_event_log(manifest)
         self._render_preview_rows(rows, draft.selected_cue_indexes)
         self.preview_mark_start_item = (
             preview_item_id(draft.marked_start_cue_index)
@@ -1580,6 +1877,41 @@ class SubtitleStackApp(tk.Tk):
                 ),
             )
 
+    def _render_event_log(self, manifest) -> None:
+        for item_id in self.event_tree.get_children():
+            self.event_tree.delete(item_id)
+        events = list(getattr(manifest, "events", []))
+        if not events:
+            self._set_event_banner("info", "No recovery notes yet.")
+            return
+        for index, event in enumerate(events[-50:], start=1):
+            created_at = str(getattr(event, "created_at", ""))
+            timestamp = created_at.replace("T", " ").replace("+00:00", " UTC")
+            self.event_tree.insert(
+                "",
+                tk.END,
+                iid=f"event-{index}",
+                values=(timestamp, str(getattr(event, "level", "info")).upper(), str(getattr(event, "message", ""))),
+            )
+        latest = events[-1]
+        self._set_event_banner(str(getattr(latest, "level", "info")), str(getattr(latest, "message", "")))
+
+    def _set_event_banner(self, level: str, message: str) -> None:
+        normalized = (level or "info").lower()
+        colors = {
+            "info": ("#EEF3F9", "#1E2A36"),
+            "warning": ("#FFF4D6", "#5C4100"),
+            "error": ("#FDE7E7", "#7A1321"),
+        }
+        bg, fg = colors.get(normalized, colors["info"])
+        self.event_banner_label.configure(bg=bg, fg=fg)
+        prefix = {
+            "info": "Recovery note",
+            "warning": "Needs attention",
+            "error": "Problem",
+        }.get(normalized, "Note")
+        self.event_banner_var.set(f"{prefix}: {message or 'Nothing new yet.'}")
+
     def _editor_draft_from_manifest(self, manifest) -> JobEditorDraft:
         return JobEditorDraft(
             batch_label=manifest.series or "",
@@ -1593,6 +1925,7 @@ class SubtitleStackApp(tk.Tk):
                 for block in manifest.scene_contexts
             ],
             include_adapted_english=bool(getattr(manifest, "include_adapted_english", True)),
+            prefer_fast_translation=bool(getattr(manifest, "prefer_fast_translation", False)),
         )
 
     def _selected_preview_cue_indexes(self) -> list[int]:
@@ -1619,6 +1952,7 @@ class SubtitleStackApp(tk.Tk):
             marked_start_cue_index=cue_index_from_item_id(self.preview_mark_start_item or ""),
             marked_end_cue_index=cue_index_from_item_id(self.preview_mark_end_item or ""),
             include_adapted_english=self.include_adapted_english_var.get(),
+            prefer_fast_translation=self.prefer_fast_translation_var.get(),
         )
 
     def _update_marked_range_status(self) -> None:
@@ -1734,6 +2068,18 @@ class SubtitleStackApp(tk.Tk):
         return normalized or default
 
     def _sync_model_setting_vars(self) -> None:
+        self.asr_engine_var.set(
+            ASR_ENGINE_LABELS.get(
+                self.service.config.models.asr_engine,
+                ASR_ENGINE_LABELS[self.default_model_config.asr_engine],
+            )
+        )
+        self.faster_whisper_profile_var.set(
+            FASTER_WHISPER_PROFILE_LABELS.get(
+                self.service.config.models.faster_whisper_profile,
+                FASTER_WHISPER_PROFILE_LABELS[self.default_model_config.faster_whisper_profile],
+            )
+        )
         self.asr_model_var.set(self.service.config.models.asr)
         self.literal_model_var.set(self.service.config.models.literal_translation)
         self.adapted_model_var.set(self.service.config.models.adapted_translation)
@@ -1865,19 +2211,25 @@ class SubtitleStackApp(tk.Tk):
         percent = self._float_from_row(row, "stage_progress_percent")
         eta_seconds = self._float_from_row(row, "stage_eta_seconds")
         message = row.get("stage_progress_message", "").strip()
+        model_name = row.get("current_model", "").strip()
         parts = [f"This step: {stage_label}"]
         if percent > 0.0 or row.get("status") == "completed":
             parts.append(f"{percent:.0f}% done")
         if eta_seconds > 0.0 and percent < 100.0:
             parts.append(f"about {format_duration_compact(eta_seconds)} left")
+            finish_time = datetime.now().astimezone() + timedelta(seconds=eta_seconds)
+            parts.append(f"finishes around {finish_time.strftime('%H:%M')}")
         if message:
             parts.append(message)
+        if model_name:
+            parts.append(model_name)
         return " | ".join(parts)
 
     def _overall_progress_summary_from_row(self, row: dict[str, str]) -> str:
         percent = self._float_from_row(row, "overall_progress_percent")
         status = STATUS_LABELS.get(row.get("status", ""), row.get("status", ""))
-        return f"Whole job: {percent:.0f}% done | {status}"
+        fast_text = " | faster English on" if row.get("prefer_fast_translation") == "true" else ""
+        return f"Whole job: {percent:.0f}% done | {status}{fast_text}"
 
     def _apply_selected_job_progress_from_row(self, row: dict[str, str] | None) -> None:
         if row is None:
@@ -1890,6 +2242,12 @@ class SubtitleStackApp(tk.Tk):
         self.selected_overall_progress_var.set(self._float_from_row(row, "overall_progress_percent"))
         self.selected_stage_progress_text_var.set(self._stage_progress_summary_from_row(row))
         self.selected_overall_progress_text_var.set(self._overall_progress_summary_from_row(row))
+
+    def _apply_event_banner_from_row(self, row: dict[str, str] | None) -> None:
+        if row is None or not row.get("latest_event_message"):
+            self._set_event_banner("info", "No recovery notes yet.")
+            return
+        self._set_event_banner(row.get("latest_event_level", "info"), row.get("latest_event_message", ""))
 
     def _start_snapshot_thread(self) -> None:
         thread = threading.Thread(target=self._snapshot_loop, name="subtitle-tool-snapshot", daemon=True)
@@ -1918,15 +2276,20 @@ class SubtitleStackApp(tk.Tk):
                 f"{STAGE_LABELS.get(selected_row['stage'], selected_row['stage'])} | "
                 f"Source: {'Video' if selected_row.get('source_kind') == 'video' else 'Subtitle-only'} | "
                 f"Translation source: {'Japanese' if selected_row.get('translation_source_role') == 'ja' else 'Imported Direct English'} | "
-                f"Easy English: {'on' if selected_row.get('include_adapted_english') == 'true' else 'off'}"
+                f"Easy English: {'on' if selected_row.get('include_adapted_english') == 'true' else 'off'} | "
+                f"Fast English: {'on' if selected_row.get('prefer_fast_translation') == 'true' else 'off'}"
                 + (" | Reference loaded" if selected_row.get("has_reference") == "true" else "")
             )
+            self._apply_event_banner_from_row(selected_row)
         elif self.current_job_id is not None:
             self.current_job_id = None
             self.loaded_job_id = None
             self.selected_file_var.set("Pick or click a job on the left.")
             self.selected_job_state_var.set("Nothing is selected yet.")
             self._apply_selected_job_progress_from_row(None)
+            self._apply_event_banner_from_row(None)
+            for item_id in self.event_tree.get_children():
+                self.event_tree.delete(item_id)
 
         with self.snapshot_lock:
             snapshot = self.latest_snapshot
@@ -1992,6 +2355,7 @@ class SubtitleStackApp(tk.Tk):
             self.retry_selected_button,
             self.save_notes_button,
             self.redo_english_button,
+            self.redo_range_button,
             self.reload_lines_button,
         ):
             widget.configure(state=state)
@@ -2014,7 +2378,7 @@ class SubtitleStackApp(tk.Tk):
         self._set_rebuild_controls_enabled(True)
         message = (stdout or stderr).strip()
         if return_code == 0:
-            self.status_var.set("English subtitles were rebuilt for the selected job")
+            self.status_var.set(f"{self.rebuild_scope_label} were rebuilt for the selected job")
             if finished_job_id:
                 self._store_editor_draft(finished_job_id)
                 if self.current_job_id == finished_job_id:

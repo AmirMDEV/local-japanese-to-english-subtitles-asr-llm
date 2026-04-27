@@ -37,7 +37,9 @@ class CachePaths:
 
 @dataclass(slots=True)
 class ModelConfig:
-    asr: str = "kotoba-tech/kotoba-whisper-v1.1"
+    asr_engine: str = "kotoba"
+    asr: str = "kotoba-tech/kotoba-whisper-v2.1"
+    faster_whisper_profile: str = "auto"
     literal_translation: str = "qwen3:4b-q8_0"
     adapted_translation: str = "qwen3:4b-q8_0"
 
@@ -53,6 +55,7 @@ class ProfileConfig:
     max_rss_mb: int = 16_384
     min_free_ram_mb: int = 8_192
     min_free_ram_translation_mb: int = 6_144
+    min_free_ram_translation_resume_mb: int = 2_048
     min_free_vram_mb: int = 2_048
     max_gpu_use_mb: int = 6_656
 
@@ -108,6 +111,7 @@ def default_profiles() -> dict[str, ProfileConfig]:
             max_rss_mb=12_288,
             min_free_ram_mb=8_192,
             min_free_ram_translation_mb=6_144,
+            min_free_ram_translation_resume_mb=1_536,
             min_free_vram_mb=2_560,
             max_gpu_use_mb=6_144,
         ),

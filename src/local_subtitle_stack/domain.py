@@ -6,7 +6,7 @@ from typing import Any
 
 from .utils import now_iso, subtitle_output_dir
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 8
 JOB_STATUS_QUEUED = "queued"
 JOB_STATUS_WORKING = "working"
 JOB_STATUS_PAUSED = "paused"
@@ -76,6 +76,23 @@ class ReviewFlag:
             reason=str(data["reason"]),
             detail=str(data["detail"]),
             created_at=str(data.get("created_at", now_iso())),
+        )
+
+
+@dataclass(slots=True)
+class JobEvent:
+    level: str
+    message: str
+    created_at: str = field(default_factory=now_iso)
+    stage: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "JobEvent":
+        return cls(
+            level=str(data.get("level", "info")),
+            message=str(data.get("message", "")),
+            created_at=str(data.get("created_at", now_iso())),
+            stage=str(data["stage"]) if data.get("stage") is not None else None,
         )
 
 
@@ -194,6 +211,7 @@ class JobManifest:
     translation_source_role: str = TRANSLATION_SOURCE_JA
     imported_tracks: dict[str, str] = field(default_factory=dict)
     include_adapted_english: bool = True
+    prefer_fast_translation: bool = False
     error: str | None = None
     models: dict[str, str] = field(default_factory=dict)
     checkpoints: dict[str, StageCheckpoint] = field(default_factory=dict)
@@ -201,6 +219,7 @@ class JobManifest:
     chunk_plan: list[ChunkPlan] = field(default_factory=list)
     metrics: MetricsSummary = field(default_factory=MetricsSummary)
     review_flags: list[ReviewFlag] = field(default_factory=list)
+    events: list[JobEvent] = field(default_factory=list)
     artifacts: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -223,6 +242,7 @@ class JobManifest:
         }
         data["chunk_plan"] = [asdict(item) for item in self.chunk_plan]
         data["review_flags"] = [asdict(flag) for flag in self.review_flags]
+        data["events"] = [asdict(event) for event in self.events]
         data["metrics"] = asdict(self.metrics)
         return data
 
@@ -253,6 +273,7 @@ class JobManifest:
             ),
             imported_tracks=dict(data.get("imported_tracks", {})),
             include_adapted_english=bool(data.get("include_adapted_english", True)),
+            prefer_fast_translation=bool(data.get("prefer_fast_translation", False)),
             error=data.get("error"),
             models=dict(data.get("models", {})),
             artifacts=dict(data.get("artifacts", {})),
@@ -268,6 +289,9 @@ class JobManifest:
         ]
         manifest.review_flags = [
             ReviewFlag.from_dict(item) for item in list(data.get("review_flags", []))
+        ]
+        manifest.events = [
+            JobEvent.from_dict(item) for item in list(data.get("events", []))
         ]
         manifest.metrics = MetricsSummary.from_dict(dict(data.get("metrics", {})))
         progress_data = data.get("current_progress")

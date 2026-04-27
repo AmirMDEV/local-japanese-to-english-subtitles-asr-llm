@@ -9,6 +9,7 @@ from local_subtitle_stack.pipeline import (
     build_context_notes,
     parse_srt,
     validate_translation_payload,
+    write_srt,
 )
 
 
@@ -48,6 +49,38 @@ def test_parse_srt_rejects_malformed_timestamp_block(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Malformed SRT timestamp"):
         parse_srt(srt_path)
+
+
+def test_write_srt_clamps_tiny_asr_overlaps(tmp_path: Path) -> None:
+    srt_path = tmp_path / "overlap.srt"
+
+    write_srt(
+        srt_path,
+        [
+            Cue(index=1, start=1.0, end=2.05, text="first"),
+            Cue(index=2, start=2.0, end=3.0, text="second"),
+        ],
+    )
+
+    cues = parse_srt(srt_path)
+    assert cues[0].end == 1.999
+    assert cues[1].start == 2.0
+
+
+def test_write_srt_moves_out_of_order_starts_forward(tmp_path: Path) -> None:
+    srt_path = tmp_path / "out-of-order.srt"
+
+    write_srt(
+        srt_path,
+        [
+            Cue(index=1, start=10.0, end=10.001, text="first"),
+            Cue(index=2, start=9.98, end=11.0, text="second"),
+        ],
+    )
+
+    cues = parse_srt(srt_path)
+    assert cues[0].end == 10.5
+    assert cues[1].start == 10.5
 
 
 def test_build_context_notes_includes_overlapping_reference_lines() -> None:

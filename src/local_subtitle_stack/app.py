@@ -11,7 +11,7 @@ def build_service() -> WorkerService:
     store = QueueStore(config)
     ffmpeg = FFmpegClient(config.tools.ffmpeg, config.tools.ffprobe)
     subtitle_edit = SubtitleEditClient(config.tools.subtitle_edit)
-    ollama = OllamaClient()
+    ollama = OllamaClient(executable_path=config.tools.ollama)
     return WorkerService(
         config=config,
         store=store,

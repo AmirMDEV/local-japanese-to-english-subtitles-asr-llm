@@ -4,6 +4,9 @@ import argparse
 from pathlib import Path
 
 from .app import build_service
+from .adaptive_transcription import CourseTranscriptionRunner, TranscriptionError
+from .config import load_config
+from .integrations import FFmpegClient
 from .queue import QueueError
 
 
@@ -19,9 +22,30 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue.add_argument("--context")
     enqueue.add_argument("--recursive", action="store_true")
     enqueue.add_argument("--no-easy-english", action="store_true")
+    enqueue.add_argument("--fast-english", action="store_true")
 
     subparsers.add_parser("worker", help="Process queued jobs until the queue is empty.")
     subparsers.add_parser("status", help="Show queue status.")
+
+    transcribe = subparsers.add_parser(
+        "transcribe-batch",
+        help="Transcribe local videos into raw text, SRT, JSON, and a course manifest.",
+    )
+    transcribe.add_argument("--input-dir", required=True)
+    transcribe.add_argument("--output-dir", required=True)
+    transcribe.add_argument("--language", default="en")
+    transcribe.add_argument(
+        "--profile",
+        default="auto",
+        choices=["auto", "high", "balanced", "low_gpu", "cpu_fallback"],
+    )
+    transcribe.add_argument(
+        "--low-memory-policy",
+        default="downgrade",
+        choices=["downgrade", "wait"],
+    )
+    transcribe.add_argument("--recursive", action="store_true")
+    transcribe.add_argument("--glossary")
 
     resume = subparsers.add_parser("resume", help="Resume a queued or failed job.")
     resume.add_argument("job_id")
@@ -40,9 +64,36 @@ def build_parser() -> argparse.ArgumentParser:
     import_existing.add_argument("--series")
     import_existing.add_argument("--context")
     import_existing.add_argument("--no-easy-english", action="store_true")
+    import_existing.add_argument("--fast-english", action="store_true")
 
     rebuild = subparsers.add_parser("rebuild-english", help="Rebuild English subtitle outputs for one job.")
     rebuild.add_argument("job_id")
+
+    rebuild_range = subparsers.add_parser(
+        "rebuild-english-range",
+        help="Rebuild English subtitle outputs for one marked time range in a job.",
+    )
+    rebuild_range.add_argument("job_id")
+    rebuild_range.add_argument("--start", required=True)
+    rebuild_range.add_argument("--end", required=True)
+
+    attach_track = subparsers.add_parser(
+        "attach-track",
+        help="Attach an existing subtitle file to a job as direct English, easy English, or reference.",
+    )
+    attach_track.add_argument("job_id")
+    attach_track.add_argument("--role", required=True, choices=["ja", "direct", "easy", "reference"])
+    attach_track.add_argument("subtitle_path")
+
+    open_subtitle = subparsers.add_parser(
+        "open-subtitle",
+        help="Open one subtitle file for a selected job.",
+    )
+    open_subtitle.add_argument("job_id")
+    open_subtitle.add_argument(
+        "kind",
+        choices=["ja", "direct", "easy", "direct-partial", "easy-partial", "review"],
+    )
 
     review = subparsers.add_parser("open-review", help="Open completed subtitle outputs in Subtitle Edit.")
     review.add_argument("job_id", nargs="?")
@@ -50,6 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     output = subparsers.add_parser("open-output", help="Open the exported subtitle folder in Explorer.")
     output.add_argument("job_id", nargs="?")
 
+    subparsers.add_parser("health-check", help="Check the local setup before a long job.")
     subparsers.add_parser("pause", help="Pause the queue after the current safe checkpoint.")
     subparsers.add_parser("unpause", help="Clear the pause flag.")
     return parser
@@ -58,9 +110,30 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    service = build_service()
 
     try:
+        if args.command == "transcribe-batch":
+            config = load_config()
+            runner = CourseTranscriptionRunner(
+                ffmpeg=FFmpegClient(config.tools.ffmpeg, config.tools.ffprobe),
+                cache_dir=config.cache_paths.hf_hub_cache or None,
+                requested_profile=args.profile,
+                low_memory_policy=args.low_memory_policy,
+            )
+            results = runner.transcribe_path(
+                Path(args.input_dir),
+                Path(args.output_dir),
+                language=args.language,
+                recursive=args.recursive,
+                glossary_path=Path(args.glossary) if args.glossary else None,
+            )
+            print(f"Transcribed {len(results)} video(s).")
+            for result in results:
+                print(f"{Path(result.source_path).name} -> {result.output_dir} [{result.chosen_profile}]")
+            return 0
+
+        service = build_service()
+
         if args.command == "enqueue":
             glossary = Path(args.glossary) if args.glossary else None
             for source in args.sources:
@@ -74,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                         context=args.context,
                         recursive=args.recursive,
                         include_adapted_english=not args.no_easy_english,
+                        prefer_fast_translation=args.fast_english,
                     )
                     print(f"Queued {len(manifests)} videos from {source_path}")
                     if skipped:
@@ -88,6 +162,7 @@ def main(argv: list[str] | None = None) -> int:
                     series=args.series,
                     context=args.context,
                     include_adapted_english=not args.no_easy_english,
+                    prefer_fast_translation=args.fast_english,
                 )
                 print(f"Queued {manifest.source_name} as {manifest.job_id}")
             return 0
@@ -126,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
                 series=args.series,
                 context=args.context,
                 include_adapted_english=not args.no_easy_english,
+                prefer_fast_translation=args.fast_english,
             )
             print(f"Imported existing subtitles into {manifest.job_id}")
             return 0
@@ -133,6 +209,28 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "rebuild-english":
             manifest = service.rebuild_english_from_saved_notes(args.job_id)
             print(f"Rebuilt English for {manifest.job_id}")
+            return 0
+
+        if args.command == "rebuild-english-range":
+            manifest = service.rebuild_english_range_from_saved_notes(
+                args.job_id,
+                start_timecode=args.start,
+                end_timecode=args.end,
+            )
+            print(f"Rebuilt English for range {args.start} to {args.end} in {manifest.job_id}")
+            return 0
+
+        if args.command == "attach-track":
+            manifest = service.attach_existing_subtitle(
+                args.job_id,
+                role=args.role,
+                subtitle_path=Path(args.subtitle_path),
+            )
+            print(f"Attached {args.role} subtitles to {manifest.job_id}")
+            return 0
+
+        if args.command == "open-subtitle":
+            print(service.open_subtitle_file(args.job_id, args.kind))
             return 0
 
         if args.command == "open-review":
@@ -145,6 +243,13 @@ def main(argv: list[str] | None = None) -> int:
             print(service.open_output_folder(args.job_id))
             return 0
 
+        if args.command == "health-check":
+            report = service.health_check()
+            print(report["summary"])
+            for item in report["checks"]:
+                print(f"[{item['status'].upper()}] {item['name']}: {item['detail']}")
+            return 0
+
         if args.command == "pause":
             service.store.set_pause(True)
             print("Pause requested.")
@@ -154,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
             service.store.set_pause(False)
             print("Pause cleared.")
             return 0
-    except QueueError as exc:
+    except (QueueError, TranscriptionError) as exc:
         print(str(exc))
         return 1
 

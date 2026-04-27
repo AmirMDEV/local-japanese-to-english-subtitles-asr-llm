@@ -8,6 +8,7 @@ from local_subtitle_stack.config import AppConfig, load_config, save_config, def
 def test_translation_floor_is_not_higher_than_asr_floor() -> None:
     for profile in default_profiles().values():
         assert profile.min_free_ram_translation_mb <= profile.min_free_ram_mb
+        assert profile.min_free_ram_translation_resume_mb <= profile.min_free_ram_translation_mb
 
 
 def test_default_profile_is_conservative() -> None:
