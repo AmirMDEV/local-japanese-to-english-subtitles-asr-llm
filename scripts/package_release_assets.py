@@ -18,7 +18,7 @@ def add_files(zip_path: Path, base_dir: Path, relative_paths: list[Path]) -> Non
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dist-root", required=True)
-    parser.add_argument("--dist-name", default="SubtitleTool")
+    parser.add_argument("--dist-name", default="JapaneseToEnglishSubtitler")
     args = parser.parse_args()
 
     dist_root = Path(args.dist_root).resolve()

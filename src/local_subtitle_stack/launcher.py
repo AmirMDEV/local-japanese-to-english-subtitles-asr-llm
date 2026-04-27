@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import sys
 
-from . import cli, ui
+try:
+    from . import cli, ui
+except ImportError:
+    from local_subtitle_stack import cli, ui
 
 
 CLI_COMMANDS = {

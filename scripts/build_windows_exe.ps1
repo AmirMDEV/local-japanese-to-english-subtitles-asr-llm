@@ -1,6 +1,6 @@
 param(
     [string]$VenvPath = ".venv311",
-    [string]$DistName = "SubtitleTool"
+    [string]$DistName = "JapaneseToEnglishSubtitler"
 )
 
 $ErrorActionPreference = "Stop"

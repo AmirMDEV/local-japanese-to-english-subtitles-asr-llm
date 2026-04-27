@@ -1,12 +1,12 @@
-# Local Japanese to English subtitles (ASR + LLM)
+# Japanese to English Subtitler
 
-Desktop app for creating Japanese-to-English subtitles locally with Kotoba ASR and Ollama, then reinterpreting the English using whole-video notes or scene-specific notes.
+Desktop app for creating Japanese-to-English subtitles locally with Kotoba ASR, faster-whisper, and Ollama, then improving the English using whole-video notes or scene-specific notes.
 
 It is made for long videos, batch jobs, and careful subtitle cleanup.
 
-![Subtitle Tool overview](docs/images/app-overview.png)
+![Japanese to English Subtitler overview](docs/images/app-overview.png)
 
-![Subtitle Tool context notes](docs/images/app-context-notes.png)
+![Japanese to English Subtitler context notes](docs/images/app-context-notes.png)
 
 ![Import existing subtitles](docs/images/app-import-existing.png)
 
@@ -48,9 +48,9 @@ They are saved in a folder named like this:
 
 1. Download the newest release files from the [Releases](https://github.com/AmirMDEV/local-japanese-to-english-subtitles-asr-llm/releases) page.
 2. Put every `.zip` file from that release into the same folder.
-3. Unzip them all into the same place, like `C:\SubtitleTool`.
+3. Unzip them all into the same place, like `C:\JapaneseToEnglishSubtitler`.
 4. If Windows asks whether to merge folders, say `Yes`.
-5. Run `SubtitleTool.exe`.
+5. Run `JapaneseToEnglishSubtitler.exe`.
 6. Install the helper tools below one time.
 7. Pick your model settings in the app.
 8. Add videos or import subtitles.
@@ -94,7 +94,7 @@ It just means:
 1. Download every `.zip` file for the same release.
 2. Extract them into the same folder.
 3. Let Windows merge the folders together.
-4. Run `SubtitleTool.exe`.
+4. Run `JapaneseToEnglishSubtitler.exe`.
 
 ## Super Easy Setup
 
@@ -126,7 +126,7 @@ If both commands answer back, you are good.
 
 ### 3. Open the App
 
-Run `SubtitleTool.exe`.
+Run `JapaneseToEnglishSubtitler.exe`.
 
 At the top you will see a section called `Model and cache settings`.
 
