@@ -69,6 +69,7 @@ DONATE_URL = "https://www.paypal.com/donate/?hosted_button_id=2U2GXSKFJKJCA"
 
 ASR_ENGINE_LABELS = {
     "kotoba": "Kotoba Japanese quality (recommended)",
+    "reazonspeech-k2": "ReazonSpeech k2 Japanese ASR (experimental)",
     "faster-whisper": "Fast local Whisper",
 }
 ASR_ENGINE_KEYS_BY_LABEL = {label: key for key, label in ASR_ENGINE_LABELS.items()}
@@ -661,6 +662,7 @@ class SubtitleStackApp(tk.Tk):
             inner,
             text=(
                 "These are app-wide defaults. Kotoba is the quality-first Japanese ASR path. "
+                "ReazonSpeech k2 is an opt-in Japanese CER experiment. "
                 "Fast local Whisper is available for rougher speed-first runs. English models are Ollama model names."
             ),
             style="Hint.TLabel",
@@ -685,7 +687,7 @@ class SubtitleStackApp(tk.Tk):
             width=34,
         ).grid(row=2, column=1, sticky=tk.W, padx=(8, 8), pady=(8, 0))
 
-        ttk.Label(inner, text="Kotoba Japanese model").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Label(inner, text="Japanese ASR model").grid(row=3, column=0, sticky=tk.W, pady=(8, 0))
         ttk.Entry(inner, textvariable=self.asr_model_var).grid(row=3, column=1, sticky="ew", padx=(8, 8), pady=(8, 0))
         ttk.Button(inner, text="Pick folder", command=self.choose_asr_model_folder).grid(
             row=3,

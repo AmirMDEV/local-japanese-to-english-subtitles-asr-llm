@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import builtins
 import json
+from pathlib import Path
 
 import pytest
 import requests
 
-from local_subtitle_stack.integrations import OllamaClient
+from local_subtitle_stack.integrations import ExternalToolError, OllamaClient, ReazonSpeechK2ASRClient
 
 
 class FakeResponse:
@@ -71,3 +73,18 @@ def test_ollama_client_does_not_auto_start_for_remote_host(monkeypatch: pytest.M
 
     with pytest.raises(requests.ConnectionError):
         client.list_models()
+
+
+def test_reazonspeech_k2_missing_dependency_has_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name.startswith("reazonspeech"):
+            raise ModuleNotFoundError("No module named 'reazonspeech'", name="reazonspeech")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    client = ReazonSpeechK2ASRClient("reazon-research/reazonspeech-k2-v2")
+
+    with pytest.raises(ExternalToolError, match="ReazonSpeech k2 is optional"):
+        client.transcribe_chunk(Path("missing.wav"), batch_size=1, device="cpu")

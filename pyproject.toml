@@ -25,6 +25,9 @@ dev = [
   "Pillow>=11.0",
   "pytest>=8.3",
 ]
+reazon-k2 = [
+  "reazonspeech-k2-asr @ git+https://github.com/reazon-research/ReazonSpeech.git@master#subdirectory=pkg/k2-asr",
+]
 gpu = [
   "torch>=2.6",
 ]

@@ -1,6 +1,6 @@
 # Japanese to English Subtitler
 
-Desktop app for creating Japanese-to-English subtitles locally with Kotoba ASR, faster-whisper, and Ollama, then improving the English using whole-video notes or scene-specific notes.
+Desktop app for creating Japanese-to-English subtitles locally with Kotoba ASR, experimental ReazonSpeech k2, faster-whisper, and Ollama, then improving the English using whole-video notes or scene-specific notes.
 
 It is made for long videos, batch jobs, and careful subtitle cleanup.
 
@@ -16,6 +16,7 @@ It is made for long videos, batch jobs, and careful subtitle cleanup.
 - Windows `.exe` release
 - Safe default profile for smaller laptops
 - Japanese transcription
+- Experimental ReazonSpeech k2 Japanese ASR path
 - Direct English subtitle pass
 - Natural English subtitle pass
 - Whole-video helper notes
@@ -64,6 +65,7 @@ You only need to install these once:
 - [FFmpeg](https://ffmpeg.org/download.html) so the app can read video audio
 - [Subtitle Edit](https://www.nikse.dk/subtitleedit) if you want one-click review in Subtitle Edit
 - [faster-whisper](https://github.com/SYSTRAN/faster-whisper) for the free local batch transcription path
+- Optional: `reazonspeech-k2-asr` for the experimental ReazonSpeech k2 Japanese ASR path
 
 The app itself does not ship with the big AI models inside it. You pick where those go.
 
@@ -159,6 +161,20 @@ If those are already in the boxes, you can keep them.
 Then click:
 
 - `Save model settings`
+
+## Japanese ASR Model Choice
+
+The app keeps Kotoba as the stable default because it already produces timestamped Japanese subtitle chunks reliably.
+
+ReazonSpeech k2 is now available as an experimental Japanese listening engine. Reported Japanese CER is stronger than the checked Kotoba and Whisper numbers, and it can run through ONNX/K2 on CPU, but it needs short chunks and local verification on your hardware.
+
+Install the optional runtime with:
+
+```powershell
+py -3.11 -m pip install "git+https://github.com/reazon-research/ReazonSpeech.git#subdirectory=pkg/k2-asr"
+```
+
+Then choose `ReazonSpeech k2 Japanese ASR (experimental)` in the app. The full model notes are in [ASR Model Evaluation](docs/asr-model-evaluation.md).
 
 ### 6. First Transcription Run
 

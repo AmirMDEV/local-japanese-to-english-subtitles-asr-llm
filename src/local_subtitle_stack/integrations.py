@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import gc
+import math
+import os
 import json
 import subprocess
 import time
+import wave
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -306,6 +309,142 @@ class TransformersASRClient:
                 torch.cuda.empty_cache()
         except ImportError:
             pass
+        gc.collect()
+
+
+class ReazonSpeechK2ASRClient:
+    INSTALL_HINT = (
+        "ReazonSpeech k2 is optional. Install it with "
+        "`py -3.11 -m pip install "
+        "git+https://github.com/reazon-research/ReazonSpeech.git#subdirectory=pkg/k2-asr` "
+        "and restart the app."
+    )
+
+    def __init__(self, model_id: str, cache_dir: str | None = None) -> None:
+        self.model_id = model_id
+        self.cache_dir = cache_dir or None
+        self._model: Any | None = None
+        self._device: str | None = None
+        self.language, self.precision = self._parse_model_options(model_id)
+
+    def _parse_model_options(self, model_id: str) -> tuple[str, str]:
+        normalized = model_id.strip().lower()
+        if "ja-en-mls-5k" in normalized:
+            language = "ja-en-mls-5k"
+        elif "ja-en" in normalized:
+            language = "ja-en"
+        else:
+            language = "ja"
+        if "int8-fp32" in normalized:
+            precision = "int8-fp32"
+        elif "int8" in normalized:
+            precision = "int8"
+        else:
+            precision = "fp32"
+        return language, precision
+
+    def _load(self, device: str) -> Any:
+        if self._model is not None and self._device == device:
+            return self._model
+        if self.cache_dir:
+            os.environ.setdefault("HUGGINGFACE_HUB_CACHE", self.cache_dir)
+        try:
+            from reazonspeech.k2.asr import load_model
+        except ModuleNotFoundError as exc:
+            missing = exc.name or "reazonspeech-k2-asr"
+            raise ExternalToolError(f"{self.INSTALL_HINT} Missing Python package: {missing}") from exc
+        provider = device if device in {"cpu", "cuda", "coreml"} else "cpu"
+        self._model = load_model(device=provider, precision=self.precision, language=self.language)
+        self._device = provider
+        return self._model
+
+    def transcribe_chunk(self, chunk_path: Path, batch_size: int, device: str) -> list[Cue]:
+        del batch_size
+        try:
+            from reazonspeech.k2.asr import TranscribeConfig, audio_from_path, transcribe
+        except ModuleNotFoundError as exc:
+            missing = exc.name or "reazonspeech-k2-asr"
+            raise ExternalToolError(f"{self.INSTALL_HINT} Missing Python package: {missing}") from exc
+        model = self._load(device=device)
+        result = transcribe(model, audio_from_path(str(chunk_path)), TranscribeConfig(verbose=False))
+        return self._result_to_cues(result, self._wave_duration_seconds(chunk_path))
+
+    def _wave_duration_seconds(self, chunk_path: Path) -> float:
+        try:
+            with wave.open(str(chunk_path), "rb") as audio:
+                frames = audio.getnframes()
+                rate = audio.getframerate()
+                if rate > 0:
+                    return frames / float(rate)
+        except (OSError, wave.Error):
+            return 0.0
+        return 0.0
+
+    def _result_to_cues(self, result: Any, chunk_duration: float) -> list[Cue]:
+        text = str(getattr(result, "text", "") or "").strip()
+        subwords = list(getattr(result, "subwords", []) or [])
+        if not text:
+            return []
+        if not subwords:
+            end = chunk_duration if chunk_duration > 0 else 3.0
+            return [Cue(index=1, start=0.0, end=max(end, 0.5), text=text)]
+
+        cues: list[Cue] = []
+        current_tokens: list[str] = []
+        current_start = max(float(getattr(subwords[0], "seconds", 0.0) or 0.0) - 0.08, 0.0)
+        for index, subword in enumerate(subwords):
+            token = self._clean_token(str(getattr(subword, "token", "") or ""))
+            if not token:
+                continue
+            seconds = max(float(getattr(subword, "seconds", 0.0) or 0.0), 0.0)
+            current_tokens.append(token)
+            current_text = "".join(current_tokens).strip()
+            current_duration = seconds - current_start
+            should_split = (
+                (token in "。！？!?、," and len(current_text) >= 8)
+                or (len(current_text) >= 52 and current_duration >= 1.2)
+                or current_duration >= 11.0
+            )
+            is_last = index == len(subwords) - 1
+            if should_split or is_last:
+                next_seconds = self._next_subword_seconds(subwords, index, fallback=chunk_duration)
+                end = self._cue_end(seconds, next_seconds, current_start, chunk_duration)
+                cues.append(
+                    Cue(
+                        index=len(cues) + 1,
+                        start=current_start,
+                        end=end,
+                        text=current_text,
+                    )
+                )
+                current_tokens = []
+                current_start = end
+        return cues
+
+    def _clean_token(self, token: str) -> str:
+        return token.replace("<blk>", "").replace("▁", " ").strip()
+
+    def _next_subword_seconds(self, subwords: list[Any], index: int, fallback: float) -> float:
+        for item in subwords[index + 1 :]:
+            seconds = float(getattr(item, "seconds", 0.0) or 0.0)
+            if seconds > 0:
+                return seconds
+        last_seconds = float(getattr(subwords[index], "seconds", 0.0) or 0.0)
+        if fallback > 0 and last_seconds >= fallback - 0.7:
+            return fallback
+        return last_seconds + 0.7
+
+    def _cue_end(self, seconds: float, next_seconds: float, start: float, chunk_duration: float) -> float:
+        candidate = max(seconds + 0.35, next_seconds, start + 0.5)
+        if chunk_duration > 0:
+            candidate = min(candidate, chunk_duration)
+        if not math.isfinite(candidate):
+            candidate = start + 0.5
+        return max(candidate, start + 0.5)
+
+    def close(self) -> None:
+        self._model = None
+        self._device = None
         gc.collect()
 
 

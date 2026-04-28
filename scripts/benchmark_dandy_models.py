@@ -33,6 +33,7 @@ SAMPLES = (
 )
 ASR_CANDIDATES = (
     ("kotoba-v2.1", "kotoba", "kotoba-tech/kotoba-whisper-v2.1", "auto"),
+    ("reazonspeech-k2-v2", "reazonspeech-k2", "reazon-research/reazonspeech-k2-v2", "auto"),
     ("kotoba-v1.1", "kotoba", "kotoba-tech/kotoba-whisper-v1.1", "auto"),
     ("faster-whisper-balanced", "faster-whisper", "kotoba-tech/kotoba-whisper-v2.1", "balanced"),
 )

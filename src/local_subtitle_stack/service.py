@@ -14,6 +14,7 @@ from .adaptive_transcription import (
     ordered_profile_candidates,
 )
 from .config import AppConfig
+from .asr_models import REAZON_K2_ENGINE, REAZON_K2_MODEL_ID
 from .domain import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_WORKING,
@@ -42,6 +43,7 @@ from .guards import (
 from .integrations import (
     FFmpegClient,
     OllamaClient,
+    ReazonSpeechK2ASRClient,
     SubtitleEditClient,
     TransformersASRClient,
     load_cues,
@@ -94,6 +96,8 @@ STAGE_DISPLAY_LABELS = {
 
 ASR_ENGINE_FASTER_WHISPER = "faster-whisper"
 ASR_ENGINE_KOTOBA = "kotoba"
+ASR_ENGINE_REAZON_K2 = REAZON_K2_ENGINE
+REAZON_K2_CHUNK_SECONDS = 25
 
 
 class WorkerService:
@@ -941,7 +945,7 @@ class WorkerService:
         if manifest.current_stage == STAGE_TRANSCRIBE:
             if self._asr_engine() == ASR_ENGINE_FASTER_WHISPER:
                 return f"faster-whisper:{self._faster_whisper_profile_name()}"
-            return self.config.models.asr
+            return self._asr_model_id_for_engine()
         if manifest.current_stage == STAGE_LITERAL:
             return self.config.models.literal_translation
         if manifest.current_stage == STAGE_ADAPTED:
@@ -1089,10 +1093,13 @@ class WorkerService:
             message="Checking the video length",
         )
         self._save_progress(job_dir, manifest, force=True)
+        chunk_seconds = profile.chunk_seconds
+        if self._asr_engine() == ASR_ENGINE_REAZON_K2:
+            chunk_seconds = min(chunk_seconds, REAZON_K2_CHUNK_SECONDS)
         manifest.chunk_plan = self.ffmpeg.create_chunk_plan(
             source_path=Path(manifest.source_path),
             chunks_dir=chunks_dir,
-            chunk_seconds=profile.chunk_seconds,
+            chunk_seconds=chunk_seconds,
             overlap_seconds=profile.chunk_overlap_seconds,
             progress_callback=lambda info: self._on_extract_progress(job_dir, manifest, info),
         )
@@ -1102,6 +1109,8 @@ class WorkerService:
             "chunk_count": len(manifest.chunk_plan),
             "total_seconds": total_seconds,
             "mode": "lazy-chunk-extraction",
+            "engine": self._asr_engine(),
+            "chunk_seconds": chunk_seconds,
         }
         self._clear_stage_progress(manifest)
         self._save_manifest(job_dir, manifest)
@@ -1138,7 +1147,15 @@ class WorkerService:
             return ASR_ENGINE_FASTER_WHISPER
         if normalized in {"kotoba", "transformers", "kotoba-whisper"}:
             return ASR_ENGINE_KOTOBA
+        if normalized in {"reazonspeech-k2", "reazonspeech k2", "reazon-k2", "reazon", "reazonspeech-k2-experimental"}:
+            return ASR_ENGINE_REAZON_K2
         return ASR_ENGINE_FASTER_WHISPER
+
+    def _asr_model_id_for_engine(self) -> str:
+        configured = str(getattr(self.config.models, "asr", "") or "").strip()
+        if self._asr_engine() == ASR_ENGINE_REAZON_K2 and "reazonspeech" not in configured.lower():
+            return REAZON_K2_MODEL_ID
+        return configured
 
     def _faster_whisper_profile_name(self) -> str:
         profile = getattr(self.config.models, "faster_whisper_profile", "auto")
@@ -1292,18 +1309,45 @@ class WorkerService:
             self._save_manifest(job_dir, manifest)
             return
         profile = self.config.profile(manifest.profile)
-        device = choose_device(profile.min_free_vram_mb)
+        engine = self._asr_engine()
+        if engine == ASR_ENGINE_REAZON_K2:
+            device = "cpu"
+            ensure_safe_to_start_job(profile.min_free_ram_mb, profile.max_rss_mb)
+        else:
+            device = choose_device(profile.min_free_vram_mb)
         if device == "cuda":
             ensure_safe_to_start_gpu_phase(profile.min_free_ram_mb, profile.min_free_vram_mb, profile.max_rss_mb)
-        else:
+        elif engine != ASR_ENGINE_REAZON_K2:
             ensure_safe_to_start_job(profile.min_free_ram_mb, profile.max_rss_mb)
 
         transcript_dir = job_dir / "chunk-transcripts"
         transcript_dir.mkdir(parents=True, exist_ok=True)
-        asr = TransformersASRClient(
-            self.config.models.asr,
-            cache_dir=self.config.cache_paths.hf_hub_cache or None,
-        )
+        model_id = self._asr_model_id_for_engine()
+        if engine == ASR_ENGINE_REAZON_K2:
+            asr = ReazonSpeechK2ASRClient(
+                model_id,
+                cache_dir=self.config.cache_paths.hf_hub_cache or None,
+            )
+            checkpoint.details.update(
+                {
+                    "engine": ASR_ENGINE_REAZON_K2,
+                    "model_id": model_id,
+                    "mode": "chunked-reazonspeech-k2",
+                    "benchmark_note": "Reported CER: JSUT 6.45, Common Voice v8 Japanese 7.85, TEDxJP-10K 9.09.",
+                }
+            )
+        else:
+            asr = TransformersASRClient(
+                model_id,
+                cache_dir=self.config.cache_paths.hf_hub_cache or None,
+            )
+            checkpoint.details.update(
+                {
+                    "engine": ASR_ENGINE_KOTOBA,
+                    "model_id": model_id,
+                    "mode": "chunked-transformers",
+                }
+            )
         all_chunk_cues: list[tuple[float, list[Cue]]] = []
         batch_size = profile.asr_batch_size
         try:

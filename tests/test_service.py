@@ -23,7 +23,7 @@ from local_subtitle_stack.domain import (
 from local_subtitle_stack.guards import ResourceSnapshot
 from local_subtitle_stack.integrations import SubtitleEditClient
 from local_subtitle_stack.queue import QueueError, QueueStore
-from local_subtitle_stack.service import WorkerService
+from local_subtitle_stack.service import ASR_ENGINE_REAZON_K2, WorkerService
 from local_subtitle_stack.utils import subtitle_output_dir
 
 
@@ -122,6 +122,16 @@ class FakeASR:
 
     def close(self) -> None:
         return None
+
+
+class FakeReazonK2ASR(FakeASR):
+    def transcribe_chunk(self, chunk_path: Path, batch_size: int, device: str) -> list[Cue]:
+        assert batch_size == 1
+        assert device == "cpu"
+        return [
+            Cue(index=1, start=0.0, end=1.4, text="レアゾン音声認識"),
+            Cue(index=2, start=1.8, end=3.0, text="テストです"),
+        ]
 
 
 class FailOnSecondChunkASR(FakeASR):
@@ -283,6 +293,29 @@ class TwoChunkFFmpeg(FakeFFmpeg):
         return plans
 
 
+class CaptureChunkSettingsFFmpeg(FakeFFmpeg):
+    def __init__(self) -> None:
+        super().__init__()
+        self.chunk_seconds_seen: int | None = None
+
+    def create_chunk_plan(
+        self,
+        source_path: Path,
+        chunks_dir: Path,
+        chunk_seconds: int,
+        overlap_seconds: int,
+        progress_callback=None,
+    ) -> list[ChunkPlan]:
+        self.chunk_seconds_seen = chunk_seconds
+        return super().create_chunk_plan(
+            source_path,
+            chunks_dir,
+            chunk_seconds,
+            overlap_seconds,
+            progress_callback,
+        )
+
+
 def write_srt_fixture(path: Path, entries: list[tuple[str, str, str]]) -> None:
     blocks: list[str] = []
     for index, (start, end, text) in enumerate(entries, start=1):
@@ -359,6 +392,34 @@ def test_fast_whisper_engine_uses_single_audio_pass(
     assert loaded.checkpoint(STAGE_TRANSCRIBE).details["engine"] == "faster-whisper"
     assert (output_dir / loaded.artifacts["ja_srt"]).exists()
     assert (output_dir / loaded.artifacts["literal_srt"]).exists()
+
+
+def test_reazonspeech_k2_engine_uses_short_cpu_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    monkeypatch.setattr("local_subtitle_stack.service.ReazonSpeechK2ASRClient", FakeReazonK2ASR)
+    service = build_service(tmp_path, SuccessfulOllama())
+    service.config.models.asr_engine = "reazonspeech-k2-experimental"
+    service.config.models.asr = "kotoba-tech/kotoba-whisper-v2.1"
+    service.ffmpeg = CaptureChunkSettingsFFmpeg()
+    source = tmp_path / "reazon-scene.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="conservative", include_adapted_english=False)
+
+    service.run_until_empty()
+
+    assert service._asr_engine() == ASR_ENGINE_REAZON_K2
+    assert isinstance(service.ffmpeg, CaptureChunkSettingsFFmpeg)
+    assert service.ffmpeg.chunk_seconds_seen == 25
+    _job_dir, loaded = service.store.find_job(manifest.job_id)
+    details = loaded.checkpoint(STAGE_TRANSCRIBE).details
+    extract_details = loaded.checkpoint(STAGE_EXTRACT).details
+    assert details["engine"] == "reazonspeech-k2"
+    assert details["model_id"] == "reazon-research/reazonspeech-k2-v2"
+    assert extract_details["chunk_seconds"] == 25
+    assert loaded.checkpoint(STAGE_TRANSCRIBE).status == "completed"
 
 
 def test_enqueue_creates_source_side_output_folder(
