@@ -21,10 +21,23 @@ Environment: scratch Python 3.12 virtual environment at `scratch/asr-bench-venv`
 | Model | Runtime path | Device | Cold setup/load | Cached model load | 20s inference | Total cached run | Output notes |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
 | Kotoba-Whisper v2.2 | `transformers` ASR pipeline, `AutoModelForSpeechSeq2Seq`, `torch.float16` | `cuda:0` | 122.58s first load/download | 5.56s | 2.78s | 8.34s | Fastest inference. Good punctuation and chunk timestamps. Text started: `ちょっとこの面接の風景を...大丈夫ですか?` |
-| Qwen3-ASR 1.7B | official `qwen-asr` package, transformers backend, `torch.bfloat16` | `cuda:0` | 349.34s first load/download | 8.09s | 7.95s | 16.05s | Fit in 8 GB VRAM for this short sample. No timestamps without the extra forced aligner. Text had broader context but added possible hallucinated tail text after the 20s sample. |
-| ReazonSpeech k2 v2 | `reazonspeech.k2.asr`, ONNX/K2 | CPU | one-time model download already completed in previous smoke test | included in run | 9.20s cached smoke run | 9.20s | Good sentence text, no punctuation. Uses token timestamps but needs app-side cue splitting. |
+| Qwen3-ASR 1.7B raw | official `qwen-asr` package, transformers backend, `torch.bfloat16` | `cuda:0` | 349.34s first load/download | 8.09s | 7.95s | 16.05s | Fit in 8 GB VRAM for this short sample. No timestamps without the extra forced aligner. Text had broader context but added possible hallucinated tail text after the 20s sample. |
+| ReazonSpeech k2 v2 initial | `reazonspeech.k2.asr`, ONNX/K2 | CPU | one-time model download already completed in previous smoke test | included in run | 9.20s cached smoke run | 9.20s | Good first sentence text, no punctuation, but missed later speech in the same 20s sample. Needs shorter chunks for subtitle use. |
 
 Timing read: Kotoba v2.2 is fastest for this exact 20 second sample on this machine. Qwen3-ASR 1.7B is slower and needs the forced aligner model before it can produce subtitle timing, but it did fit on the GPU. Qwen should stay a research candidate until timestamp integration and hallucination checks pass on multiple samples.
+
+## Fair Subtitle Timing Check
+
+Same 20 second sample, but each model is configured closer to how it would be used for subtitle generation.
+
+| Model | Subtitle setup | Device | Cached load | 20s inference | Total cached run | Timestamp output | Accuracy notes |
+| --- | --- | --- | ---: | ---: | ---: | --- | --- |
+| Kotoba-Whisper v2.2 | `transformers` ASR pipeline with Whisper timestamps | `cuda:0` | 5.56s | 2.78s | 8.34s | 5 chunks | Fastest. Good punctuation. Missed filler `あの` near the start compared with the previous Kotoba v2.1 reference. |
+| Qwen3-ASR 1.7B + Qwen3-ForcedAligner 0.6B | official `qwen-asr`, `return_time_stamps=True` | `cuda:0` | 13.39s | 6.99s | 20.38s | 51 aligned items | Fit in 8 GB VRAM, but used about 7.2 GB total GPU memory on this desktop state. Good first sentence, added extra tail text through `加奈さんかわいい。` inside the 20s sample. |
+| Qwen3-ASR 0.6B + Qwen3-ForcedAligner 0.6B | official `qwen-asr`, `return_time_stamps=True` | `cuda:0` | 10.45s | 8.81s | 19.26s | 48 aligned items | Smaller ASR was not faster on this sample. More wording errors: `始めます`, `神楽川`, and extra `かわいいですね`. |
+| ReazonSpeech k2 v2 | app wrapper, ONNX/K2, 6s chunks, 1s overlap, app cue merge | CPU | 5.19s | 7.14s | 12.33s | 4 merged cues | Captured more speech than the first long-chunk smoke, but still dropped or truncated some phrases. Better than 25s chunks, not reliable enough yet. |
+
+Fair-test read: Kotoba v2.2 remains the best current production choice for speed plus subtitle timing. Qwen 1.7B with forced aligner is usable and properly timestamped, but slower and heavy on VRAM. Qwen 0.6B is not clearly useful here. ReazonSpeech k2 needs VAD-grade segmentation before it can compete as a subtitle engine.
 
 ## Ranked Candidates
 

@@ -412,13 +412,13 @@ def test_reazonspeech_k2_engine_uses_short_cpu_chunks(
 
     assert service._asr_engine() == ASR_ENGINE_REAZON_K2
     assert isinstance(service.ffmpeg, CaptureChunkSettingsFFmpeg)
-    assert service.ffmpeg.chunk_seconds_seen == 25
+    assert service.ffmpeg.chunk_seconds_seen == 6
     _job_dir, loaded = service.store.find_job(manifest.job_id)
     details = loaded.checkpoint(STAGE_TRANSCRIBE).details
     extract_details = loaded.checkpoint(STAGE_EXTRACT).details
     assert details["engine"] == "reazonspeech-k2"
     assert details["model_id"] == "reazon-research/reazonspeech-k2-v2"
-    assert extract_details["chunk_seconds"] == 25
+    assert extract_details["chunk_seconds"] == 6
     assert loaded.checkpoint(STAGE_TRANSCRIBE).status == "completed"
 
 
