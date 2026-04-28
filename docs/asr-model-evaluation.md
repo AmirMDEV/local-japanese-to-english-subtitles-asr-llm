@@ -10,6 +10,22 @@ Keep Kotoba as the stable default because it already works with the existing tim
 
 Add ReazonSpeech k2 as the first experimental alternative because it has stronger reported Japanese CER, is Japanese-specific, uses ONNX/K2, and can run on CPU. It is opt-in until local subtitle timing and long-video behavior are verified on the target machine.
 
+## Local 20 Second Timing Check
+
+Sample: `DANDY-386.mp4`, audio from `00:01:21` to `00:01:41`, extracted as 16 kHz mono WAV.
+
+Machine state: Windows laptop, NVIDIA GeForce RTX 3070 Laptop GPU, 8 GB VRAM, NVIDIA driver 591.86, CUDA 13.1 runtime. GPU already had about 3.3 GB in use from desktop apps before the run.
+
+Environment: scratch Python 3.12 virtual environment at `scratch/asr-bench-venv`, CUDA Torch `2.11.0+cu130`.
+
+| Model | Runtime path | Device | Cold setup/load | Cached model load | 20s inference | Total cached run | Output notes |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| Kotoba-Whisper v2.2 | `transformers` ASR pipeline, `AutoModelForSpeechSeq2Seq`, `torch.float16` | `cuda:0` | 122.58s first load/download | 5.56s | 2.78s | 8.34s | Fastest inference. Good punctuation and chunk timestamps. Text started: `ちょっとこの面接の風景を...大丈夫ですか?` |
+| Qwen3-ASR 1.7B | official `qwen-asr` package, transformers backend, `torch.bfloat16` | `cuda:0` | 349.34s first load/download | 8.09s | 7.95s | 16.05s | Fit in 8 GB VRAM for this short sample. No timestamps without the extra forced aligner. Text had broader context but added possible hallucinated tail text after the 20s sample. |
+| ReazonSpeech k2 v2 | `reazonspeech.k2.asr`, ONNX/K2 | CPU | one-time model download already completed in previous smoke test | included in run | 9.20s cached smoke run | 9.20s | Good sentence text, no punctuation. Uses token timestamps but needs app-side cue splitting. |
+
+Timing read: Kotoba v2.2 is fastest for this exact 20 second sample on this machine. Qwen3-ASR 1.7B is slower and needs the forced aligner model before it can produce subtitle timing, but it did fit on the GPU. Qwen should stay a research candidate until timestamp integration and hallucination checks pass on multiple samples.
+
 ## Ranked Candidates
 
 | Rank | Model | App status | Reported evidence | Why it matters |
