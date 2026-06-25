@@ -62,6 +62,7 @@ from .pipeline import (
     normalize_japanese_cues,
     parse_srt,
     strict_retry_prompt,
+    subtitle_quality_flags,
     validate_translation_payload,
     write_review_flags,
     write_srt,
@@ -1698,7 +1699,23 @@ class WorkerService:
                         recovery_note,
                         stage=stage_name,
                     )
-                translated_cues.extend(apply_translations(group, translations))
+                new_cues = apply_translations(group, translations)
+                previous_text = translated_cues[-1].text if translated_cues else None
+                translated_cues.extend(new_cues)
+                for cue_index, reason, detail in subtitle_quality_flags(
+                    group,
+                    new_cues,
+                    glossary,
+                    previous_text=previous_text,
+                ):
+                    manifest.review_flags.append(
+                        ReviewFlag(
+                            stage=stage_name,
+                            group_index=group_index,
+                            reason=reason,
+                            detail=detail,
+                        )
+                    )
 
             checkpoint.details["completed_groups"] = group_index + 1
             atomic_write_json(

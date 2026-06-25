@@ -225,6 +225,16 @@ class FailOnSecondLiteralGroupOllama(SuccessfulOllama):
         return super().generate_json(model, prompt, temperature)
 
 
+class QualityFlagOllama(SuccessfulOllama):
+    def generate_json(self, model: str, prompt: str, temperature: float) -> dict[str, list[str]]:
+        self.calls.append((model, prompt))
+        count = prompt.count('"index":')
+        if '"literal_en"' in prompt:
+            return {"translations": [f"adapted line {index + 1}" for index in range(count)]}
+        lines = ["ありがとう", "same repeated", "same repeated"]
+        return {"translations": lines[:count]}
+
+
 def build_config(tmp_path: Path) -> AppConfig:
     return AppConfig(
         config_path=str(tmp_path / "config.toml"),
@@ -402,7 +412,7 @@ def test_reazonspeech_k2_engine_uses_short_cpu_chunks(
     monkeypatch.setattr("local_subtitle_stack.service.ReazonSpeechK2ASRClient", FakeReazonK2ASR)
     service = build_service(tmp_path, SuccessfulOllama())
     service.config.models.asr_engine = "reazonspeech-k2-experimental"
-    service.config.models.asr = "kotoba-tech/kotoba-whisper-v2.1"
+    service.config.models.asr = "kotoba-tech/kotoba-whisper-v2.2"
     service.ffmpeg = CaptureChunkSettingsFFmpeg()
     source = tmp_path / "reazon-scene.mp4"
     source.write_text("video", encoding="utf-8")
@@ -1173,6 +1183,40 @@ def test_rebuild_english_splits_batches_when_model_returns_too_few_lines(
     assert all(row["literal_english"] for row in preview)
     assert all(row["adapted_english"] for row in preview)
     assert "translation-batch-retry" in review
+
+
+def test_rebuild_english_marks_subtitle_quality_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, QualityFlagOllama())
+    primary_srt = tmp_path / "quality.ja.srt"
+    write_srt_fixture(
+        primary_srt,
+        [
+            ("00:00:00,000", "00:00:01,000", "line 1"),
+            ("00:00:01,000", "00:00:02,000", "line 2"),
+            ("00:00:02,000", "00:00:03,000", "line 3"),
+        ],
+    )
+    manifest = service.import_existing(
+        profile="conservative",
+        primary_subtitle=primary_srt,
+        japanese=primary_srt,
+    )
+
+    rebuilt = service.rebuild_english(
+        manifest.job_id,
+        batch_label=None,
+        overall_context=None,
+        scene_contexts=[],
+    )
+
+    _job_dir, loaded = service.store.find_job(rebuilt.job_id)
+    reasons = {flag.reason for flag in loaded.review_flags}
+    assert "japanese-leakage" in reasons
+    assert "repeated-output" in reasons
 
 
 def test_import_existing_requires_a_real_source_track(

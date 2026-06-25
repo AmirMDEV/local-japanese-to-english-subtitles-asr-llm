@@ -298,6 +298,59 @@ def apply_translations(template_cues: list[Cue], texts: list[str], max_chars: in
     return translated
 
 
+def subtitle_quality_flags(
+    source_group: list[Cue],
+    translated_group: list[Cue],
+    glossary: list[dict[str, str]],
+    previous_text: str | None = None,
+) -> list[tuple[int, str, str]]:
+    flags: list[tuple[int, str, str]] = []
+    previous_normalized = normalize_compare_text(previous_text or "")
+    for source, translated in zip(source_group, translated_group, strict=True):
+        text = translated.text.strip()
+        flat_text = " ".join(text.split())
+        duration = max(translated.end - translated.start, 0.1)
+        cps = len(flat_text) / duration
+        if cps > 24:
+            flags.append(
+                (
+                    source.index,
+                    "subtitle-too-dense",
+                    f"Cue {source.index} reads at {cps:.1f} chars/sec.",
+                )
+            )
+        longest_line = max((len(line.strip()) for line in text.splitlines()), default=0)
+        if longest_line > 46:
+            flags.append(
+                (
+                    source.index,
+                    "subtitle-line-too-long",
+                    f"Cue {source.index} has a {longest_line}-character line.",
+                )
+            )
+        if re.search(r"[\u3040-\u30ff\u3400-\u9fff]", flat_text):
+            flags.append((source.index, "japanese-leakage", f"Cue {source.index} still contains Japanese text."))
+        source_flat = " ".join(source.text.split())
+        if source_flat and normalize_compare_text(source_flat) == normalize_compare_text(flat_text):
+            flags.append((source.index, "unchanged-text", f"Cue {source.index} matches the source text."))
+        normalized = normalize_compare_text(flat_text)
+        if normalized and normalized == previous_normalized and len(normalized) > 8:
+            flags.append((source.index, "repeated-output", f"Cue {source.index} repeats the previous output."))
+        previous_normalized = normalized
+        for item in glossary:
+            jp = str(item.get("jp", "")).strip()
+            preferred = str(item.get("preferred_en") or item.get("literal_en") or "").strip()
+            if jp and preferred and jp in source.text and preferred.lower() not in flat_text.lower():
+                flags.append(
+                    (
+                        source.index,
+                        "glossary-miss",
+                        f"Cue {source.index} source contains '{jp}' but output lacks '{preferred}'.",
+                    )
+                )
+    return flags
+
+
 def format_srt_timestamp(value: float) -> str:
     total_ms = max(int(round(value * 1000)), 0)
     hours = total_ms // 3_600_000

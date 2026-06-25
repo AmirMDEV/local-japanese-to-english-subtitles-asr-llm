@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-25
+
+- Updated the default Kotoba Japanese ASR model to `kotoba-tech/kotoba-whisper-v2.2`.
+- Fixed adaptive batch transcription so per-video outputs honor the requested output folder.
+- Added a bounded low-memory wait timeout for adaptive transcription.
+- Added subtitle quality review flags for dense lines, long lines, Japanese leakage, repeated output, unchanged text, and glossary misses.
+
 ## 2026-04-28
 
 - Bumped the app version to `0.3.0` for the renamed quality-first release line.

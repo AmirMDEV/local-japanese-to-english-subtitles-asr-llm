@@ -152,7 +152,7 @@ This folder is where the Japanese transcription model gets downloaded the first 
 
 The app starts with recommended defaults:
 
-- Japanese model: `kotoba-tech/kotoba-whisper-v2.1`
+- Japanese model: `kotoba-tech/kotoba-whisper-v2.2`
 - Direct English model: `qwen3:4b-q8_0`
 - Natural English model: `qwen3:4b-q8_0`
 
@@ -294,7 +294,7 @@ If you are not sure what to use, start here:
 - Speed mode: `Safe and steady (recommended)`
 - Japanese listening engine: `Kotoba Japanese quality (recommended)`
 - Whisper speed profile: `Auto choose best fit`
-- Japanese model: `kotoba-tech/kotoba-whisper-v2.1`
+- Japanese model: `kotoba-tech/kotoba-whisper-v2.2`
 - Direct English model: `qwen3:4b-q8_0`
 - Natural English model: `qwen3:4b-q8_0`
 

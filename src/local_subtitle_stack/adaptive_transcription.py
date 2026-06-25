@@ -349,6 +349,10 @@ class CourseTranscriptionRunner:
         low_memory_policy: str = "downgrade",
         snapshot_provider: Callable[[], ResourceSnapshot] = capture_snapshot,
         backend_factory: Callable[[TranscriptionProfile, str | None], FasterWhisperBackend] | None = None,
+        wait_timeout_seconds: float = 1800.0,
+        wait_poll_seconds: float = 10.0,
+        cancel_requested: Callable[[], bool] | None = None,
+        status_callback: Callable[[str], None] | None = None,
     ) -> None:
         self.ffmpeg = ffmpeg
         self.cache_dir = cache_dir or None
@@ -356,6 +360,10 @@ class CourseTranscriptionRunner:
         self.low_memory_policy = low_memory_policy
         self.snapshot_provider = snapshot_provider
         self.backend_factory = backend_factory or self._default_backend_factory
+        self.wait_timeout_seconds = wait_timeout_seconds
+        self.wait_poll_seconds = wait_poll_seconds
+        self.cancel_requested = cancel_requested or (lambda: False)
+        self.status_callback = status_callback or (lambda _message: None)
         self._backend_cache: dict[str, FasterWhisperBackend] = {}
 
     def _default_backend_factory(
@@ -480,8 +488,19 @@ class CourseTranscriptionRunner:
                         backend.close()
             if chosen_profile is None:
                 if self.low_memory_policy == "wait":
+                    wait_started = time.monotonic()
                     while chosen_profile is None:
-                        time.sleep(10)
+                        if self.cancel_requested():
+                            raise TranscriptionError("Transcription cancelled while waiting for enough memory.")
+                        elapsed = time.monotonic() - wait_started
+                        if elapsed >= self.wait_timeout_seconds:
+                            raise TranscriptionError(
+                                f"Timed out after {self.wait_timeout_seconds:.0f}s waiting for enough memory."
+                            ) from last_error
+                        self.status_callback(
+                            f"Waiting for enough memory before {source_path.name} ({elapsed:.0f}s elapsed)."
+                        )
+                        time.sleep(self.wait_poll_seconds)
                         snapshot = self.snapshot_provider()
                         candidates, selection_note = ordered_profile_candidates(
                             snapshot,
@@ -535,7 +554,7 @@ class CourseTranscriptionRunner:
         result = TranscriptionResult(
             source_path=str(source_path),
             relative_output_dir=str(
-                output_dir.relative_to(input_root) if input_root is not None else Path(".")
+                output_dir.relative_to(output_root) if output_dir != output_root else Path(".")
             ),
             output_dir=str(output_dir),
             requested_profile=self.requested_profile,
@@ -595,8 +614,9 @@ class CourseTranscriptionRunner:
         input_root: Path | None,
     ) -> Path:
         if input_root is not None:
-            return source_path.parent
-        return source_path.parent
+            relative_parent = source_path.parent.relative_to(input_root)
+            return output_root / relative_parent
+        return output_root
 
     def _render_transcript_text(self, cues: list[Cue]) -> str:
         lines = [

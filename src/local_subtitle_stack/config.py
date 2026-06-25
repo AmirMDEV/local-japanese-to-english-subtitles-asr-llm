@@ -38,7 +38,7 @@ class CachePaths:
 @dataclass(slots=True)
 class ModelConfig:
     asr_engine: str = "kotoba"
-    asr: str = "kotoba-tech/kotoba-whisper-v2.1"
+    asr: str = "kotoba-tech/kotoba-whisper-v2.2"
     faster_whisper_profile: str = "auto"
     literal_translation: str = "qwen3:4b-q8_0"
     adapted_translation: str = "qwen3:4b-q8_0"

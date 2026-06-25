@@ -2,8 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from local_subtitle_stack.adaptive_transcription import (
     CourseTranscriptionRunner,
+    TranscriptionError,
     TranscriptionProfile,
     TranscriptionResult,
     TRANSCRIPTION_PROFILE_LADDER,
@@ -42,6 +45,11 @@ class FakeBackend:
 
     def close(self) -> None:
         self.closed = True
+
+
+class MemoryFailingBackend(FakeBackend):
+    def transcribe(self, audio_path: Path, language: str):
+        raise RuntimeError("CUDA out of memory")
 
 
 def test_profile_selection_scales_down_to_available_resources() -> None:
@@ -88,10 +96,10 @@ def test_batch_runner_writes_outputs_and_manifest(monkeypatch, tmp_path: Path) -
 
     assert len(results) == 2
     assert chosen_profiles == ["high"]
-    assert (input_dir / "lesson one.raw.txt").exists()
-    assert (input_dir / "lesson one.raw.srt").exists()
-    assert (input_dir / "lesson one.raw.segments.json").exists()
-    assert (input_dir / "lesson one.raw.meta.json").exists()
+    assert (output_dir / "lesson one.raw.txt").exists()
+    assert (output_dir / "lesson one.raw.srt").exists()
+    assert (output_dir / "lesson one.raw.segments.json").exists()
+    assert (output_dir / "lesson one.raw.meta.json").exists()
     assert (output_dir / "course.raw.txt").exists()
     assert (output_dir / "course_manifest.json").exists()
     assert "# lesson one" in (output_dir / "course.raw.txt").read_text(encoding="utf-8")
@@ -164,3 +172,26 @@ def test_batch_runner_downgrades_when_requested_profile_fails(monkeypatch, tmp_p
 
     assert results[0].chosen_profile in {"low_gpu", "cpu_fallback"}
     assert attempted[0] == "low_gpu" or attempted[0] == "cpu_fallback"
+
+
+def test_wait_policy_times_out_instead_of_waiting_forever(tmp_path: Path) -> None:
+    ffmpeg = FakeFFmpeg()
+    snapshot = ResourceSnapshot(free_ram_mb=1, process_rss_mb=500, gpu_free_mb=0, gpu_total_mb=0)
+    statuses: list[str] = []
+    runner = CourseTranscriptionRunner(
+        ffmpeg=ffmpeg,  # type: ignore[arg-type]
+        requested_profile="high",
+        low_memory_policy="wait",
+        snapshot_provider=lambda: snapshot,
+        backend_factory=lambda profile, cache_dir: MemoryFailingBackend(profile, cache_dir),
+        wait_timeout_seconds=0.0,
+        wait_poll_seconds=0.0,
+        status_callback=statuses.append,
+    )
+    source = tmp_path / "lesson.mp4"
+    source.write_text("video", encoding="utf-8")
+
+    with pytest.raises(TranscriptionError, match="Timed out"):
+        runner.transcribe_path(source, tmp_path / "out", language="en")
+
+    assert (tmp_path / "out").exists()
