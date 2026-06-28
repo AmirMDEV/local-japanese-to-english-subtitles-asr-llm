@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from local_subtitle_stack.web_ui import count_completed_outputs, count_sources
+from local_subtitle_stack.web_ui import HTML, count_completed_outputs, count_sources
 
 
 def test_web_ui_counts_sources_and_completed_outputs(tmp_path: Path) -> None:
@@ -17,3 +17,10 @@ def test_web_ui_counts_sources_and_completed_outputs(tmp_path: Path) -> None:
     assert count_sources([folder], recursive=True) == 2
     assert count_sources([video], recursive=True) == 1
     assert count_completed_outputs([folder], recursive=True) == 1
+
+
+def test_web_ui_has_responsive_layout_shell() -> None:
+    assert "className:\"layout\"" in HTML
+    assert "@media (max-width: 980px)" in HTML
+    assert "target-list" in HTML
+    assert "max-height: min(34vh, 340px)" in HTML
