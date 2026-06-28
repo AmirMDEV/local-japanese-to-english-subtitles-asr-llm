@@ -37,6 +37,7 @@ HTML = r"""<!doctype html>
     button.secondary { background: #263236; color: #eef3f4; }
     button.danger { background: #fecaca; color: #7f1d1d; }
     button:disabled { opacity: .48; cursor: not-allowed; }
+    input.grow { flex: 1 1 360px; min-width: 220px; }
     .path { font-family: Consolas, monospace; color: #d8e4e6; overflow-wrap: anywhere; }
     .list { display: grid; gap: 8px; margin-top: 12px; }
     .item { padding: 10px; background: rgba(0,0,0,.18); border-radius: 6px; }
@@ -66,14 +67,22 @@ HTML = r"""<!doctype html>
       const [recursive, setRecursive] = React.useState(true);
       const [status, setStatus] = React.useState({running:false, completed:0, total:0, log:""});
       const [error, setError] = React.useState("");
+      const [manualPath, setManualPath] = React.useState("");
 
       const refresh = () => api("/api/status").then(setStatus).catch(err => setError(err.message));
       React.useEffect(() => { refresh(); const id = setInterval(refresh, 1500); return () => clearInterval(id); }, []);
 
-      const pickFolder = () => api("/api/pick-folder").then(d => d.path && setTargets([d.path])).catch(err => setError(err.message));
-      const pickFiles = () => api("/api/pick-files").then(d => d.paths?.length && setTargets(d.paths)).catch(err => setError(err.message));
-      const start = () => api("/api/start", {targets, profile, recursive}).then(setStatus).catch(err => setError(err.message));
-      const cancel = () => api("/api/cancel", {}).then(setStatus).catch(err => setError(err.message));
+      const pickFolder = () => { setError(""); api("/api/pick-folder").then(d => d.path && setTargets([d.path])).catch(err => setError(err.message)); };
+      const pickFiles = () => { setError(""); api("/api/pick-files").then(d => d.paths?.length && setTargets(d.paths)).catch(err => setError(err.message)); };
+      const addManual = () => {
+        const value = manualPath.trim();
+        if (!value) return;
+        setTargets(current => current.includes(value) ? current : current.concat(value));
+        setManualPath("");
+        setError("");
+      };
+      const start = () => { setError(""); api("/api/start", {targets, profile, recursive}).then(setStatus).catch(err => setError(err.message)); };
+      const cancel = () => { setError(""); api("/api/cancel", {}).then(setStatus).catch(err => setError(err.message)); };
       const pct = status.total ? Math.round(status.completed / status.total * 100) : 0;
 
       return e(React.Fragment, null,
@@ -85,12 +94,15 @@ HTML = r"""<!doctype html>
           e("div", {className:"row"},
             e("button", {onClick:pickFolder, disabled:status.running}, "Select folder"),
             e("button", {onClick:pickFiles, disabled:status.running}, "Select files"),
+            e("input", {className:"grow", value:manualPath, onChange:ev=>setManualPath(ev.target.value), onKeyDown:ev=>{ if (ev.key === "Enter") addManual(); }, disabled:status.running, placeholder:"Paste a folder or video path"}),
+            e("button", {className:"secondary", onClick:addManual, disabled:status.running || !manualPath.trim()}, "Add path"),
             e("select", {value:profile, onChange:ev=>setProfile(ev.target.value), disabled:status.running},
               ["auto","high","balanced","low_gpu","cpu_fallback"].map(v => e("option", {key:v, value:v}, v))
             ),
             e("label", null, e("input", {type:"checkbox", checked:recursive, onChange:ev=>setRecursive(ev.target.checked), disabled:status.running}), " Recursive"),
             e("button", {onClick:start, disabled:status.running || !targets.length}, "Start"),
-            e("button", {className:"danger", onClick:cancel, disabled:!status.running}, "Cancel")
+            e("button", {className:"danger", onClick:cancel, disabled:!status.running}, "Cancel"),
+            e("button", {className:"secondary", onClick:()=>setTargets([]), disabled:status.running || !targets.length}, "Clear")
           ),
           e("div", {className:"list"}, targets.map(path => e("div", {className:"item path", key:path}, path)))
         ),
