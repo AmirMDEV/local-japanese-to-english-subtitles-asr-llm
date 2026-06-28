@@ -66,6 +66,7 @@ PREVIEW_COLUMN_MIN_WIDTH = {
 }
 
 DONATE_URL = "https://www.paypal.com/donate/?hosted_button_id=2U2GXSKFJKJCA"
+RECOMMENDED_TRANSLATION_MODEL = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e2b"
 
 ASR_ENGINE_LABELS = {
     "kotoba": "Kotoba Japanese quality (recommended)",
@@ -436,6 +437,7 @@ class SubtitleStackApp(tk.Tk):
         self.asr_model_var = tk.StringVar(value=self.service.config.models.asr)
         self.literal_model_var = tk.StringVar(value=self.service.config.models.literal_translation)
         self.adapted_model_var = tk.StringVar(value=self.service.config.models.adapted_translation)
+        self.ollama_model_values = self._ollama_model_values()
         self.hf_cache_var = tk.StringVar(value=self.service.config.cache_paths.hf_hub_cache or "")
         self.batch_label_var = tk.StringVar()
         self.recursive_var = tk.BooleanVar(value=False)
@@ -697,14 +699,19 @@ class SubtitleStackApp(tk.Tk):
         )
 
         ttk.Label(inner, text="Direct English model").grid(row=4, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(inner, textvariable=self.literal_model_var).grid(
+        self.literal_model_box = ttk.Combobox(
+            inner,
+            textvariable=self.literal_model_var,
+            values=self.ollama_model_values,
+        )
+        self.literal_model_box.grid(
             row=4,
             column=1,
             sticky="ew",
             padx=(8, 8),
             pady=(8, 0),
         )
-        ttk.Label(inner, text="Example: qwen3:4b-q8_0", style="Hint.TLabel").grid(
+        ttk.Button(inner, text="Refresh", command=self.refresh_ollama_models).grid(
             row=4,
             column=2,
             sticky=tk.W,
@@ -712,18 +719,24 @@ class SubtitleStackApp(tk.Tk):
         )
 
         ttk.Label(inner, text="Natural English model").grid(row=5, column=0, sticky=tk.W, pady=(8, 0))
-        ttk.Entry(inner, textvariable=self.adapted_model_var).grid(
+        self.adapted_model_box = ttk.Combobox(
+            inner,
+            textvariable=self.adapted_model_var,
+            values=self.ollama_model_values,
+        )
+        self.adapted_model_box.grid(
             row=5,
             column=1,
             sticky="ew",
             padx=(8, 8),
             pady=(8, 0),
         )
-        ttk.Label(
-            inner,
-            text="Used when you press Redo English or run a full job.",
-            style="Hint.TLabel",
-        ).grid(row=5, column=2, sticky=tk.W, pady=(8, 0))
+        ttk.Button(inner, text="Use Gemma e2b", command=self.use_recommended_translation_model).grid(
+            row=5,
+            column=2,
+            sticky=tk.W,
+            pady=(8, 0),
+        )
 
         ttk.Label(inner, text="Model cache folder").grid(row=6, column=0, sticky=tk.W, pady=(8, 0))
         ttk.Entry(inner, textvariable=self.hf_cache_var).grid(
@@ -743,6 +756,10 @@ class SubtitleStackApp(tk.Tk):
         buttons = ttk.Frame(inner)
         buttons.grid(row=7, column=0, columnspan=4, sticky=tk.W, pady=(10, 0))
         ttk.Button(buttons, text="Save model settings", command=self.save_model_settings).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Download Gemma e2b", command=self.download_recommended_translation_model).pack(
+            side=tk.LEFT,
+            padx=6,
+        )
         ttk.Button(buttons, text="Use recommended defaults", command=self.reset_model_settings_defaults).pack(
             side=tk.LEFT,
             padx=6,
@@ -752,11 +769,51 @@ class SubtitleStackApp(tk.Tk):
             inner,
             text=(
                 "Leave the cache folder blank to use the normal model cache location. "
-                "Saving here updates future runs and English rebuilds."
+                "Saving here updates future runs and English rebuilds. "
+                "Gemma e2b is the small text translation candidate from Ollama."
             ),
             style="Hint.TLabel",
             wraplength=1250,
         ).grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
+
+    def _ollama_model_values(self) -> list[str]:
+        try:
+            models = self.service.ollama.list_models()
+        except Exception:
+            models = []
+        values = [
+            self.service.config.models.literal_translation,
+            self.service.config.models.adapted_translation,
+            RECOMMENDED_TRANSLATION_MODEL,
+            *models,
+        ]
+        return sorted({value for value in values if value})
+
+    def refresh_ollama_models(self) -> None:
+        self.ollama_model_values = self._ollama_model_values()
+        self.literal_model_box.configure(values=self.ollama_model_values)
+        self.adapted_model_box.configure(values=self.ollama_model_values)
+        self.status_var.set(f"Found {len(self.ollama_model_values)} Ollama model option(s)")
+
+    def use_recommended_translation_model(self) -> None:
+        self.literal_model_var.set(RECOMMENDED_TRANSLATION_MODEL)
+        self.adapted_model_var.set(RECOMMENDED_TRANSLATION_MODEL)
+        self.status_var.set("Gemma e2b selected for direct and natural English")
+
+    def download_recommended_translation_model(self) -> None:
+        self.status_var.set(f"Downloading {RECOMMENDED_TRANSLATION_MODEL}...")
+
+        def worker() -> None:
+            try:
+                self.service.ollama.pull_model(RECOMMENDED_TRANSLATION_MODEL)
+            except Exception as exc:
+                self.after(0, lambda: self.status_var.set(f"Download failed: {exc}"))
+                return
+            self.after(0, self.refresh_ollama_models)
+            self.after(0, self.use_recommended_translation_model)
+            self.after(0, lambda: self.status_var.set(f"Downloaded {RECOMMENDED_TRANSLATION_MODEL}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_right_panel(self, parent: ttk.Frame) -> None:
         selected_frame = ttk.LabelFrame(parent, text="Selected job", style="Section.TLabelframe")

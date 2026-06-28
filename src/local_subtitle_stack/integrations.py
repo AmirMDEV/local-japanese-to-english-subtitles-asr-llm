@@ -533,6 +533,15 @@ class OllamaClient:
         payload = response.json()
         return [item["name"] for item in payload.get("models", [])]
 
+    def pull_model(self, model: str) -> None:
+        response = self._request(
+            "POST",
+            "/api/pull",
+            json={"name": model, "stream": False},
+            timeout=3600,
+        )
+        response.json()
+
     def generate_json(self, model: str, prompt: str, temperature: float) -> dict[str, Any]:
         response = self._request(
             "POST",
