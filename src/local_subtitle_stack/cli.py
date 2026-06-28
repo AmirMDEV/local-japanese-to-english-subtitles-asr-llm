@@ -104,6 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("health-check", help="Check the local setup before a long job.")
     subparsers.add_parser("pause", help="Pause the queue after the current safe checkpoint.")
     subparsers.add_parser("unpause", help="Clear the pause flag.")
+    web_ui = subparsers.add_parser("web-ui", help="Open the local Fast Transcriber web UI.")
+    web_ui.add_argument("--port", default="8765")
     return parser
 
 
@@ -259,6 +261,11 @@ def main(argv: list[str] | None = None) -> int:
             service.store.set_pause(False)
             print("Pause cleared.")
             return 0
+
+        if args.command == "web-ui":
+            from .web_ui import main as web_ui_main
+
+            return web_ui_main([args.port])
     except (QueueError, TranscriptionError) as exc:
         print(str(exc))
         return 1
