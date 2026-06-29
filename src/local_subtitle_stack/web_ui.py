@@ -767,6 +767,25 @@ HTML = r"""<!doctype html>
         return post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, start_timecode:start, end_timecode:end, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
       };
       const runCoherencePass = () => post("/api/job/coherence-pass", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes});
+      const selectCoherenceChange = change => {
+        const targetIndex = Number(change.cue_index);
+        const row = (job?.preview || []).find(item => Number(item.cue_index) === targetIndex);
+        setSelectedCueIndexes([row ? row.cue_index : targetIndex]);
+        setLine(row ? {...row} : {
+          cue_index: targetIndex,
+          start: change.start,
+          end: change.end,
+          japanese: "",
+          literal_english: "",
+          adapted_english: change.after || "",
+          reference: "",
+          has_japanese: false,
+          has_literal_english: false,
+          has_adapted_english: true,
+          has_reference: false
+        });
+        setTimeout(() => document.querySelector(".line-edit-grid")?.scrollIntoView({block:"nearest", behavior:"smooth"}), 0);
+      };
       const restoreCoherenceChange = change => post("/api/job/line", {
         job_id:selectedJobId,
         cue_index:change.cue_index,
@@ -1022,7 +1041,7 @@ HTML = r"""<!doctype html>
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "After second-pass coherence review, changed context-applied English lines appear here. Click a change to select that subtitle line. Restore before puts that one line back."),
                 status.rebuild_running && selectedRow ? progressPanel(selectedRow, "Second-pass coherence review progress") : null,
-                job?.coherence_review?.length ? e("div", {className:"change-list"}, job.coherence_review.map(change => e("div", {key:change.cue_index, className:"change-row", onClick:()=>setLine((job.preview || []).find(row => row.cue_index === change.cue_index) || line)},
+                job?.coherence_review?.length ? e("div", {className:"change-list"}, job.coherence_review.map(change => e("div", {key:change.cue_index, className:"change-row", role:"button", tabIndex:0, onClick:()=>selectCoherenceChange(change), onKeyDown:ev=>{ if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectCoherenceChange(change); } }},
                   e("span", {className:"change-time"}, `#${change.cue_index}\n${formatSecondsDisplay(change.start)} - ${formatSecondsDisplay(change.end)}`),
                   e("span", {className:"change-before"}, change.before),
                   e("span", {className:"change-after"}, change.after),
