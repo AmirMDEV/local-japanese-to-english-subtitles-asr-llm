@@ -110,6 +110,9 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Resume stuck job" in HTML
     assert "/api/job/resume" in HTML
     assert "canResumeJob" in HTML
+    assert "Force stop now" in HTML
+    assert "/api/job/force-stop" in HTML
+    assert "canForceStopJob" in HTML
     assert "Stop this job after current step" in HTML
     assert "/api/job/stop" in HTML
     assert "stop_requested" in HTML
@@ -183,6 +186,9 @@ def test_resume_stuck_job_stops_owned_worker_before_requeue(monkeypatch) -> None
         def cmdline(self) -> list[str]:
             return ["python", "-m", "local_subtitle_stack.cli", "worker"]
 
+        def children(self, recursive: bool = False) -> list:
+            return []
+
         def terminate(self) -> None:
             self.terminated = True
 
@@ -201,6 +207,65 @@ def test_resume_stuck_job_stops_owned_worker_before_requeue(monkeypatch) -> None
     assert process.terminated is True
     assert state.service.resumed == ["job-1"]
     assert state.worker_process is None
+
+
+def test_force_stop_working_job_stops_worker_tree_and_marks_paused(monkeypatch) -> None:
+    class FakeStore:
+        def __init__(self) -> None:
+            self.manifest = SimpleNamespace(job_id="job-1", status=JOB_STATUS_WORKING)
+            self.paused: list[tuple[Path, object]] = []
+
+        def find_job(self, job_id: str):
+            return Path("working") / job_id, self.manifest
+
+        def active_worker_pid(self) -> int:
+            return 123
+
+        def mark_paused(self, job_dir: Path, manifest):
+            manifest.status = "paused"
+            self.paused.append((job_dir, manifest))
+            return Path("incoming") / manifest.job_id, manifest
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.store = FakeStore()
+            self.resume_states: list[tuple[Path, object]] = []
+
+        def _write_resume_state(self, job_dir: Path, manifest) -> None:
+            self.resume_states.append((job_dir, manifest))
+
+    class FakeProcess:
+        def __init__(self, pid: int, children: list | None = None) -> None:
+            self.pid = pid
+            self._children = list(children or [])
+            self.terminated = False
+            self.killed = False
+
+        def cmdline(self) -> list[str]:
+            return ["python", "-m", "local_subtitle_stack.cli", "worker"]
+
+        def children(self, recursive: bool = False) -> list:
+            return list(self._children)
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    child = FakeProcess(456)
+    parent = FakeProcess(123, [child])
+    state = WebServiceState.__new__(WebServiceState)
+    state.service = FakeService()
+    state.worker_process = SimpleNamespace(pid=123)
+    monkeypatch.setattr("local_subtitle_stack.web_ui.psutil.Process", lambda _pid: parent)
+    monkeypatch.setattr("local_subtitle_stack.web_ui.psutil.wait_procs", lambda processes, timeout: (processes, []))
+
+    assert state.force_stop_job("job-1") == {"job_id": "job-1"}
+    assert parent.terminated is True
+    assert child.terminated is True
+    assert state.service.store.paused[0][0] == Path("working") / "job-1"
+    assert state.service.resume_states[0][0] == Path("incoming") / "job-1"
 
 
 def test_resume_stuck_job_refuses_unknown_worker_process(monkeypatch) -> None:

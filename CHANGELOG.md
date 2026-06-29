@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Added `Force stop now` in the web UI for long-running jobs, terminating only the owned worker process tree and pausing the job immediately.
 - Added a web `Resume this job` / `Resume stuck job` control that requeues paused, failed, queued, or stuck working jobs and restarts processing.
 - Made web line edits auto-save into the preview and subtitle files, and added the context-applied English column to the preview grid.
 - Combined Health and Redo log into one collapsible web diagnostics panel with side-by-side desktop columns and a single mobile stack.
