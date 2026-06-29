@@ -59,6 +59,10 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "/api/job?id=" in HTML
     assert "Transcription and translation models" in HTML
     assert "model-settings-panel" in HTML
+    assert "grid-template-columns: minmax(420px, 1.08fr) minmax(360px, .92fr)" in HTML
+    assert "text-overflow: ellipsis" in HTML
+    assert "Use Gemma e2b" not in HTML
+    assert "Download Gemma" not in HTML
     assert "Unsaved changes" in HTML
     assert "dirty-pill" in HTML
     assert "select option" in HTML

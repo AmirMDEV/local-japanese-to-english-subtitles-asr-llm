@@ -132,7 +132,8 @@ HTML = r"""<!doctype html>
     }
     .model-settings-panel { order: -1; }
     .model-settings-panel .panel-body {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: minmax(420px, 1.08fr) minmax(360px, .92fr);
+      align-items: end;
     }
     .model-settings-panel .section-note,
     .model-settings-panel .button-row {
@@ -169,6 +170,8 @@ HTML = r"""<!doctype html>
     .control-span-3 { grid-column: span 3; }
     .field { display: grid; gap: 6px; min-width: 0; }
     .field label, .check-label { color: var(--muted); font-size: 12px; font-weight: 600; }
+    .field select, .field input { width: 100%; min-width: 0; }
+    .model-settings-panel select, .model-settings-panel input { overflow: hidden; text-overflow: ellipsis; }
     .check-label {
       display: flex;
       gap: 8px;
@@ -421,6 +424,9 @@ HTML = r"""<!doctype html>
       .workflow { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .topbar { grid-template-columns: 1fr; }
       .topbar .button-row { justify-content: flex-start; }
+    }
+    @media (max-width: 1180px) {
+      .model-settings-panel .panel-body { grid-template-columns: 1fr; }
     }
     @media (max-width: 640px) {
       main { padding: 12px; }
@@ -1051,8 +1057,6 @@ HTML = r"""<!doctype html>
                 ) : null,
                 e("div", {className:"button-row"},
                   e("button", {onClick:saveSettings}, "Save settings"),
-                  e("button", {className:"secondary", onClick:()=>post("/api/settings/use-recommended", {}, applySettings)}, "Use Gemma e2b"),
-                  e("button", {className:"secondary", onClick:()=>post("/api/settings/download-recommended", {})}, "Download Gemma"),
                   e("button", {className:"danger", onClick:()=>post("/api/settings/reset", {}, applySettings)}, "Defaults")
                 )
               )
