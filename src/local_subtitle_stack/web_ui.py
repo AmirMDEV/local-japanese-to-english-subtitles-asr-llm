@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -11,7 +12,7 @@ from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from .app import build_service
 from .asr_models import ranked_asr_candidates
@@ -334,6 +335,15 @@ HTML = r"""<!doctype html>
       adapted: "Improve English wording",
       finalize: "Save subtitle files"
     })[stage] || (stage || "Not started");
+    const jobStepText = row => {
+      if (!row) return "";
+      if (row.status === "completed" && row.stage === "finalize") return "Saved subtitle files";
+      return row.step_text || "";
+    };
+    const selectedStageLabel = row => {
+      if (row?.status === "completed" && row?.stage === "finalize") return "Saved subtitle files";
+      return stageLabel(row?.stage);
+    };
     const reviewHint = row => {
       if (!row) return "Start at Step 1: choose videos or an existing subtitle file.";
       if (row.status === "completed") return "Review output now: open the subtitle lines below, edit any bad line, or open the saved files.";
@@ -404,6 +414,17 @@ HTML = r"""<!doctype html>
         setNoteStart(""); setNoteEnd(""); setNoteText("");
       };
       const saveNotes = () => selectedJobId && post("/api/job/notes", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
+      const deleteSelectedJob = () => {
+        if (!selectedJobId) return;
+        if (!confirm("Delete this job from the queue list? Saved subtitle files in the output folder stay on disk.")) return;
+        post("/api/job/delete", {job_id:selectedJobId}, () => {
+          setSelectedJobId("");
+          setJob(null);
+          setLine(null);
+          setSelectedCueIndexes([]);
+          refresh();
+        });
+      };
       const saveLine = () => line && selectedJobId && post("/api/job/line", {
         job_id:selectedJobId,
         cue_index:line.cue_index,
@@ -539,7 +560,7 @@ HTML = r"""<!doctype html>
                 jobs.length ? jobs.map(row => e("button", {key:row.job_id, className:`job-row ${row.job_id===selectedJobId?"active":""}`, onClick:()=>setSelectedJobId(row.job_id)},
                   e("strong", null, row.source),
                   e("span", {className:"tiny"}, `${row.status} | ${row.stage} | ${row.overall_progress_percent || 0}%`),
-                  e("span", null, row.step_text || "")
+                  e("span", null, jobStepText(row))
                 )) : e("div", {className:"empty"}, "No jobs yet.")
               )
             ),
@@ -551,16 +572,17 @@ HTML = r"""<!doctype html>
               e("div", {className:"panel-body stack"},
                 e("div", {className:"review-box"}, e("strong", null, "What to do now"), e("p", null, reviewHint(selectedRow))),
                 selectedRow ? e("div", {className:"status-grid"},
-                  e("div", {className:"metric"}, e("span", null, "Current step"), e("strong", null, stageLabel(selectedRow.stage))),
+                  e("div", {className:"metric"}, e("span", null, "Current step"), e("strong", null, selectedStageLabel(selectedRow))),
                   e("div", {className:"metric"}, e("span", null, "Progress"), e("strong", null, `${selectedRow.overall_progress_percent || 0}%`)),
                   e("div", {className:"metric"}, e("span", null, "Model in use"), e("strong", null, modelText))
                 ) : e("div", {className:"empty"}, "Select a job."),
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/job/retry", {job_id:selectedJobId})}, "Run this job again"),
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"folder"})}, "Open subtitle folder"),
-                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"review"})}, "Open in Subtitle Edit")
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"review"})}, "Open in Subtitle Edit"),
+                  e("button", {className:"danger", disabled:!selectedJobId, onClick:deleteSelectedJob}, "Delete job from list")
                 ),
-                e("p", {className:"section-note"}, "Open saved subtitle files for review. Draft files appear while a rerun is still in progress."),
+                e("p", {className:"section-note"}, "Open saved subtitle files for review. Delete removes this job card only; exported subtitle files stay in the output folder."),
                 e("div", {className:"button-row"},
                   outputButtons.map(([kind, label]) => e("button", {key:kind, className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:kind})}, label))
                 )
@@ -935,10 +957,17 @@ class WebServiceState:
 
     def job(self, job_id: str) -> dict[str, Any]:
         _job_dir, manifest = self.service.load_job(job_id)
+        subtitle_error = None
+        try:
+            subtitle_files = {key: str(value) for key, value in self.service.subtitle_file_paths(job_id).items()}
+        except Exception as exc:
+            subtitle_files = {}
+            subtitle_error = str(exc)
         return {
             "manifest": manifest.to_dict(),
             "preview": self.service.preview_rows(job_id),
-            "subtitle_files": {key: str(value) for key, value in self.service.subtitle_file_paths(job_id).items()},
+            "subtitle_files": subtitle_files,
+            "subtitle_file_error": subtitle_error,
         }
 
     def enqueue(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1018,6 +1047,13 @@ class WebServiceState:
         manifest = self.service.resume(job_id)
         self.start_worker()
         return {"job_id": manifest.job_id}
+
+    def delete_job(self, job_id: str) -> dict[str, Any]:
+        job_dir, manifest = self.service.store.find_job(job_id)
+        if manifest.status == "working":
+            raise QueueError("Stop processing before deleting a running job.")
+        shutil.rmtree(job_dir)
+        return {"deleted": job_id}
 
     def save_notes(self, payload: dict[str, Any]) -> dict[str, Any]:
         manifest = self.service.save_job_notes(
@@ -1323,26 +1359,30 @@ def pick_subtitle_file() -> str:
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
-        path = urlparse(self.path).path
-        if path == "/":
-            self._send_html(HTML)
-        elif path == "/api/status":
-            self._send_json(APP_STATE.snapshot())
-        elif path == "/api/models":
-            self._send_json(model_storage_snapshot())
-        elif path == "/api/health":
-            self._send_json(APP_STATE.health())
-        elif path == "/api/job":
-            query = dict(item.split("=", 1) for item in urlparse(self.path).query.split("&") if "=" in item)
-            self._send_json(APP_STATE.job(query.get("id", "")))
-        elif path == "/api/pick-folder":
-            self._send_json({"path": pick_folder()})
-        elif path == "/api/pick-files":
-            self._send_json({"paths": pick_files()})
-        elif path == "/api/pick-subtitle":
-            self._send_json({"path": pick_subtitle_file()})
-        else:
-            self.send_error(404)
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if path == "/":
+                self._send_html(HTML)
+            elif path == "/api/status":
+                self._send_json(APP_STATE.snapshot())
+            elif path == "/api/models":
+                self._send_json(model_storage_snapshot())
+            elif path == "/api/health":
+                self._send_json(APP_STATE.health())
+            elif path == "/api/job":
+                query = parse_qs(parsed.query)
+                self._send_json(APP_STATE.job(query.get("id", [""])[0]))
+            elif path == "/api/pick-folder":
+                self._send_json({"path": pick_folder()})
+            elif path == "/api/pick-files":
+                self._send_json({"paths": pick_files()})
+            elif path == "/api/pick-subtitle":
+                self._send_json({"path": pick_subtitle_file()})
+            else:
+                self.send_error(404)
+        except Exception as exc:
+            self._send_json({"error": str(exc)}, status=400)
 
     def do_POST(self) -> None:
         try:
@@ -1366,6 +1406,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(APP_STATE.stop_worker())
             elif self.path == "/api/job/retry":
                 self._send_json(APP_STATE.retry(str(payload["job_id"])))
+            elif self.path == "/api/job/delete":
+                self._send_json(APP_STATE.delete_job(str(payload["job_id"])))
             elif self.path == "/api/job/notes":
                 self._send_json(APP_STATE.save_notes(payload))
             elif self.path == "/api/job/line":

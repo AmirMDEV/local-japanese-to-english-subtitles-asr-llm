@@ -37,6 +37,9 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Add files and start processing" in HTML
     assert "Drop an .srt file here to edit existing subtitles" in HTML
     assert "/api/upload-subtitle" in HTML
+    assert "Saved subtitle files" in HTML
+    assert "Delete job from list" in HTML
+    assert "/api/job/delete" in HTML
 
 
 def test_web_ui_formats_model_sizes() -> None:

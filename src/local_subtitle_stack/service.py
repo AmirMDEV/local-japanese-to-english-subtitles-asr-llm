@@ -2175,7 +2175,10 @@ class WorkerService:
         export_partial_srt.unlink(missing_ok=True)
 
     def _load_optional_cues(self, job_dir: Path, manifest: JobManifest, artifact_key: str) -> list[Cue]:
-        path = job_dir / manifest.artifacts[artifact_key]
+        artifact = manifest.artifacts.get(artifact_key)
+        if not artifact:
+            return []
+        path = job_dir / artifact
         if not path.exists():
             return []
         return self._load_cues_cached(path)

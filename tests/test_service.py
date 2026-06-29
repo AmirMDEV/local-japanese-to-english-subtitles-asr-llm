@@ -780,6 +780,11 @@ def test_preview_rows_and_rebuild_english_use_saved_notes(
     assert preview[0]["literal_english"] == "literal line 1"
     assert preview[0]["adapted_english"] == "adapted line 1"
 
+    job_dir, loaded = service.load_job(manifest.job_id)
+    loaded.artifacts.pop("reference_cues", None)
+    service.store.save_manifest(job_dir, loaded)
+    assert service.preview_rows(manifest.job_id)[0]["reference"] == ""
+
     ollama.calls.clear()
     service.rebuild_english(
         manifest.job_id,
