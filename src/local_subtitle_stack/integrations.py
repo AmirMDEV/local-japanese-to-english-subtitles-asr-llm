@@ -344,7 +344,7 @@ class Qwen3ASRClient:
             dtype=dtype,
             device_map=device_map,
             max_inference_batch_size=max(int(batch_size or 1), 1),
-            max_new_tokens=512,
+            max_new_tokens=4096,
             forced_aligner=self.ALIGNER_MODEL_ID,
             forced_aligner_kwargs={"dtype": dtype, "device_map": device_map},
         )

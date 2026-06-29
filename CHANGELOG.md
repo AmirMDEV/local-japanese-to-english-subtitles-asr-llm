@@ -2,6 +2,8 @@
 
 ## 2026-06-25
 
+- Fixed Qwen3-ASR 1.7B long-sample coverage by using 30-second Qwen chunks and more generation headroom; live DANDY 90s proof now reaches 91.78s with monotonic forced-aligned cues.
+- Fixed web subtitle preview rows so time, Japanese, and direct English text stay inside row boxes, wrap cleanly, and selected rows no longer overlap nearby subtitle lines.
 - Added Qwen3-ASR 0.6B and 1.7B Japanese listening choices, routed them through the optional `qwen-asr` package with `Qwen/Qwen3-ForcedAligner-0.6B` timestamps, and recorded speaker separation as not enabled yet.
 - Added surrounding Japanese subtitle context to selected-range English retranslation prompts, while still replacing only the selected subtitle lines.
 - Added source-side resume state JSON beside exported subtitles and made the web preview poll the selected job so partial Japanese subtitles appear while transcription is still running.

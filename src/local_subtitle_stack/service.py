@@ -103,6 +103,7 @@ ASR_ENGINE_FASTER_WHISPER = "faster-whisper"
 ASR_ENGINE_KOTOBA = "kotoba"
 ASR_ENGINE_QWEN3 = QWEN3_ASR_ENGINE
 ASR_ENGINE_REAZON_K2 = REAZON_K2_ENGINE
+QWEN3_ASR_CHUNK_SECONDS = 30
 REAZON_K2_CHUNK_SECONDS = 6
 
 
@@ -1146,6 +1147,8 @@ class WorkerService:
         chunk_seconds = profile.chunk_seconds
         if self._asr_engine() == ASR_ENGINE_REAZON_K2:
             chunk_seconds = min(chunk_seconds, REAZON_K2_CHUNK_SECONDS)
+        elif self._asr_engine() == ASR_ENGINE_QWEN3:
+            chunk_seconds = min(chunk_seconds, QWEN3_ASR_CHUNK_SECONDS)
         manifest.chunk_plan = self.ffmpeg.create_chunk_plan(
             source_path=Path(manifest.source_path),
             chunks_dir=chunks_dir,

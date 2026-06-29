@@ -472,6 +472,29 @@ def test_qwen3_asr_engine_uses_forced_aligner_client(
     assert loaded.checkpoint(STAGE_TRANSCRIBE).status == "completed"
 
 
+def test_qwen3_asr_engine_uses_short_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    monkeypatch.setattr("local_subtitle_stack.service.Qwen3ASRClient", FakeQwen3ASR)
+    service = build_service(tmp_path, SuccessfulOllama())
+    service.config.models.asr_engine = "qwen3-asr"
+    service.config.models.asr = "Qwen/Qwen3-ASR-1.7B"
+    service.ffmpeg = CaptureChunkSettingsFFmpeg()
+    source = tmp_path / "qwen-long-scene.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="conservative", include_adapted_english=False)
+
+    service.run_until_empty()
+
+    assert isinstance(service.ffmpeg, CaptureChunkSettingsFFmpeg)
+    assert service.ffmpeg.chunk_seconds_seen == 30
+    _job_dir, loaded = service.store.find_job(manifest.job_id)
+    assert loaded.checkpoint(STAGE_EXTRACT).details["chunk_seconds"] == 30
+    assert loaded.checkpoint(STAGE_TRANSCRIBE).status == "completed"
+
+
 def test_enqueue_creates_source_side_output_folder(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

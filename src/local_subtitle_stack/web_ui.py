@@ -245,7 +245,7 @@ HTML = r"""<!doctype html>
     }
     .model-locations span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .job-list, .preview-list, .note-list { display: grid; gap: 8px; max-height: min(42vh, 480px); overflow: auto; }
-    .preview-list { align-content: start; max-height: min(58vh, 680px); }
+    .preview-list { align-content: start; align-items: stretch; max-height: min(58vh, 680px); }
     .job-row, .preview-row, .note-row {
       width: 100%;
       text-align: left;
@@ -281,26 +281,34 @@ HTML = r"""<!doctype html>
       gap: 8px;
       padding: 10px 12px;
       cursor: pointer;
+      box-sizing: border-box;
       height: auto;
-      min-height: max-content;
+      min-height: unset;
+      overflow: visible;
       user-select: none;
     }
     .preview-row > * { pointer-events: none; }
     .preview-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .preview-time {
-      display: block;
+      display: grid;
+      gap: 2px;
       color: var(--muted);
       font-family: Consolas, "Cascadia Mono", monospace;
       font-size: 12px;
       line-height: 1.35;
+      min-width: 0;
     }
+    .preview-index { color: var(--soft); font-weight: 800; }
+    .preview-range { overflow-wrap: anywhere; }
     .preview-text, .preview-empty {
       display: block;
       min-width: 0;
+      max-width: 100%;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
       word-break: break-word;
       line-height: 1.45;
+      overflow: visible;
     }
     .preview-empty { color: var(--muted); font-style: italic; }
     .range-card {
@@ -844,7 +852,10 @@ HTML = r"""<!doctype html>
                     e("span", null, "Direct English translation")
                   ),
                   ...job.preview.map(row => e("div", {key:row.cue_index, role:"button", tabIndex:0, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""} ${selectedCueIndexes.includes(row.cue_index)?"selected":""}`, onClick:ev=>toggleCue(row, ev), onKeyDown:ev=>{ if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggleCue(row, ev); } }},
-                    e("span", {className:"preview-time"}, `#${row.cue_index}\n${formatPreviewRange(row)}`),
+                    e("span", {className:"preview-time"},
+                      e("span", {className:"preview-index"}, `#${row.cue_index}`),
+                      e("span", {className:"preview-range"}, formatPreviewRange(row))
+                    ),
                     e("span", {className:row.japanese ? "preview-text" : "preview-empty"}, row.japanese || "No Japanese loaded"),
                     e("span", {className:row.literal_english ? "preview-text" : "preview-empty"}, row.literal_english || "No direct English loaded")
                   ))
