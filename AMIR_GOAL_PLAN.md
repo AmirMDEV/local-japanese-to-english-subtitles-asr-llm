@@ -1,47 +1,51 @@
 # Amir Goal Plan
 
 ## Objective
-Make Qwen3-ASR 1.7B complete the existing 90s sample with valid timings, and fix subtitle preview row overflow.
+Add an optional second-pass subtitle coherence workflow that rewrites context-applied English using whole-video and time-range context, then shows before/after changed lines for review.
 
 ## Constraints
-- Preserve: existing translation pipeline, queue worker, saved scene-context prompt injection.
+- Preserve: existing ASR, direct English translation, context-applied English, queue worker, saved context ranges.
 - Do not change: internal output keys `direct` and `easy`.
-- Allowed scope: Qwen ASR routing, preview layout CSS/rendering, tests, changelog, solved-problem note.
-- Not allowed: backend rewrite, frontend framework migration, new dependency.
+- Allowed scope: prompt builder, service workflow, CLI/web endpoint, web UI, tests, docs.
+- Not allowed: frontend framework rewrite, new dependency, destructive overwrite without review.
 
 ## Verification Surface
 | Check | Command/artifact | Pass condition | Required? |
 |---|---|---|---|
-| Qwen live proof | `.venv311\Scripts\python.exe .codex-temp\run_qwen17_live_test.py` | 1.7B output reaches tail, cues monotonic, no bad cues | yes |
-| Unit suite | `.venv311\Scripts\python.exe -m pytest` | all tests pass | yes |
-| Browser desktop | Playwright screenshot/verifier | preview rows and selected row have no overlap or child overflow | yes |
+| Focused tests | `.venv311\Scripts\python.exe -m pytest -q tests/test_service.py::test_coherence_pass_updates_adapted_lines_and_records_before_after tests/test_web_ui.py` | pass | yes |
+| Full suite | `.venv311\Scripts\python.exe -m pytest -q` | pass | yes |
+| Browser desktop | Playwright screenshot/verifier | second-pass controls and before/after review visible without overflow | yes |
 | Git | `git status --short --branch` | clean after push | yes |
 
 ## Stages
 | Stage | Status | Objective | Depends on | Verification | Attempts | Notes |
 |---|---|---|---|---|---|---|
-| 1 | passed | Run Qwen3-ASR 1.7B live sample proof | none | live verifier | 1/3 | first proof cut off at 66.863s |
-| 2 | passed | Patch Qwen tail coverage | 1 | live verifier | 1/3 | 30-second Qwen chunks plus 4096 generation headroom |
-| 3 | passed | Patch preview row overflow | none | Playwright layout verifier | 1/3 | row children stay inside row boxes |
-| 4 | active | Docs, commit, push | 2,3 | git clean | 1/3 | update solved note |
+| 1 | passed | Audit existing rebuild and context flow | none | code inspection | 1/3 | existing rebuild already saves notes and uses surrounding context |
+| 2 | passed | Add second-pass backend | 1 | focused service test | 1/3 | writes `coherence-review.json` before/after rows |
+| 3 | passed | Add web controls and review list | 2 | static UI test | 1/3 | includes restore-before button |
+| 4 | passed | Full verification, docs, commit, push | 3 | full suite, browser, git | 1/3 | full suite and browser verifier passed |
 
 ## Subagent Plan
 | Subagent | Purpose | Scope | Return format | Status |
 |---|---|---|---|---|
-| none | Main path is single-file sequential patch | n/a | n/a | skipped |
+| none | Single repo, sequential backend/UI edits | n/a | n/a | skipped |
 
 ## Execution Log
-- Live Qwen3-ASR 1.7B proof initially produced valid monotonic cues but stopped at 66.863s on the 90s DANDY sample.
-- Added 30-second Qwen chunks and increased Qwen generation headroom to 4096.
-- Live Qwen3-ASR 1.7B proof passed after patch: 4 chunks, 130 cues, last cue 91.78s, no bad cues, monotonic.
-- Rebuilt preview row rendering/CSS so time, Japanese, and English columns wrap inside row boxes; Playwright verifier found 13 visible rows, no row overlap, no child overflow.
-- Full test suite passed.
+- Added `build_coherence_pass_prompt` for second-pass subtitle coherence with previous final lines, target lines, next context, overall context, and time-range context.
+- Added service workflow that rewrites context-applied English, exports updated SRT, and records changed rows in `coherence-review.json`.
+- Added CLI command `coherence-pass` and web endpoint `/api/job/coherence-pass`.
+- Added web button `Run second-pass coherence review` and `Second-pass changes` before/after review list with per-line `Restore before`.
+- Focused tests passed.
+- Full suite passed.
+- Browser verifier passed for second-pass controls and layout.
 
 ## Blockers
 | Stage | Blocker | Evidence | Tried | What would unblock |
 |---|---|---|---|---|
 
 ## Definition of Done
-- Qwen3-ASR 1.7B transcribes the 90s already-transcribed sample through the clip tail with valid timings.
-- Web subtitle preview rows wrap without row overlap, text overflow, or selected-row overflow.
-- Tests and browser layout verification pass.
+- User can run optional second-pass coherence review from the web UI.
+- Review pass uses saved overall context and time-range context.
+- Changed context-applied English lines are visible as before/after rows.
+- User can restore one changed line to the previous text.
+- Tests and browser verification pass.

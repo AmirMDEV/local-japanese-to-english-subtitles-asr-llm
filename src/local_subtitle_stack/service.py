@@ -56,6 +56,7 @@ from .integrations import (
 from .pipeline import (
     apply_translations,
     build_adapted_prompt,
+    build_coherence_pass_prompt,
     build_context_notes,
     build_direct_english_rewrite_prompt,
     build_literal_prompt_with_context,
@@ -98,6 +99,7 @@ STAGE_DISPLAY_LABELS = {
     STAGE_ADAPTED: "Making context-applied English",
     STAGE_FINALIZE: "Saving the subtitle files",
 }
+COHERENCE_REVIEW_FILENAME = "coherence-review.json"
 
 ASR_ENGINE_FASTER_WHISPER = "faster-whisper"
 ASR_ENGINE_KOTOBA = "kotoba"
@@ -602,6 +604,34 @@ class WorkerService:
                 parse_timecode(end_timecode),
             )
             return manifest
+
+    def run_coherence_pass(
+        self,
+        job_id: str,
+        *,
+        batch_label: str | None,
+        overall_context: str | None,
+        scene_contexts: list[SceneContextBlock],
+    ) -> JobManifest:
+        job_dir, manifest = self.store.find_job(job_id)
+        manifest.series = batch_label or None
+        manifest.job_context = overall_context or None
+        manifest.scene_contexts = list(scene_contexts)
+        self._save_manifest(job_dir, manifest)
+        with self.store.acquire_worker_lock():
+            self._run_coherence_pass_transactional(job_dir, manifest)
+        return manifest
+
+    def run_coherence_pass_from_saved_notes(self, job_id: str) -> JobManifest:
+        with self.store.acquire_worker_lock():
+            job_dir, manifest = self.store.find_job(job_id)
+            self._run_coherence_pass_transactional(job_dir, manifest)
+            return manifest
+
+    def coherence_review(self, job_id: str) -> list[dict[str, str | int | float]]:
+        job_dir, _manifest = self.store.find_job(job_id)
+        data = read_json(job_dir / COHERENCE_REVIEW_FILENAME, default=[]) or []
+        return list(data) if isinstance(data, list) else []
 
     def attach_existing_subtitle(self, job_id: str, *, role: str, subtitle_path: Path) -> JobManifest:
         if role not in {"ja", "direct", "easy", "reference"}:
@@ -2402,6 +2432,98 @@ class WorkerService:
         if not path.exists():
             raise QueueError(f"{label} is not ready yet, so only a whole-job English rebuild is possible.")
         return self._load_cues_cached(path)
+
+    def _run_coherence_pass_transactional(self, job_dir: Path, manifest: JobManifest) -> None:
+        profile = self._require_profile(manifest.profile)
+        ensure_safe_to_start_job(
+            self._translation_stage_min_free_ram(manifest, profile, STAGE_ADAPTED),
+            profile.max_rss_mb,
+        )
+        source_path = self._translation_source_path(job_dir, manifest)
+        literal_path = job_dir / manifest.artifacts["literal_cues"]
+        adapted_path = job_dir / manifest.artifacts["adapted_cues"]
+        if not source_path.exists():
+            raise QueueError("Source subtitle lines are not ready yet for this job.")
+        if not literal_path.exists():
+            raise QueueError("Direct English translation is not ready yet for this job.")
+        if not adapted_path.exists():
+            raise QueueError("Context-applied English is not ready yet for this job.")
+
+        source_by_index = {cue.index: cue for cue in self._load_cues_cached(source_path)}
+        literal_by_index = {cue.index: cue for cue in self._load_cues_cached(literal_path)}
+        original_adapted = self._load_cues_cached(adapted_path)
+        rewritten: list[Cue] = []
+        review_rows: list[dict[str, str | int | float]] = []
+        groups = cue_groups(original_adapted, self._effective_group_size(manifest, adapted=True))
+        metadata = metadata_from_manifest(manifest.source_name, manifest.series)
+        self._append_event(manifest, "info", "Started second-pass subtitle coherence review.", stage=STAGE_ADAPTED)
+        for group_index, group in enumerate(groups):
+            self._should_pause(job_dir, manifest)
+            source_group = [source_by_index.get(cue.index, cue) for cue in group]
+            literal_group = [literal_by_index.get(cue.index, cue) for cue in group]
+            _prev, next_context = self._previous_next_context_cues(group, original_adapted, count=3)
+            context_notes = build_context_notes(
+                source_group,
+                manifest.job_context,
+                manifest.scene_contexts,
+                reference_cues=self._reference_cues_for_job(job_dir, manifest),
+                surrounding_cues=rewritten[-3:] + next_context[:3],
+            )
+            prompt = build_coherence_pass_prompt(
+                group=group,
+                source_group=source_group,
+                literal_group=literal_group,
+                current_group=group,
+                previous_final=rewritten[-12:],
+                next_context=next_context[:6],
+                context_notes=context_notes,
+                metadata=metadata,
+            )
+            translations = self._run_translation_prompt(
+                self.config.models.adapted_translation,
+                prompt,
+                len(group),
+                adapted=True,
+            )
+            new_cues = apply_translations(group, translations)
+            for before, after in zip(group, new_cues, strict=True):
+                rewritten.append(after)
+                if before.text.strip() != after.text.strip():
+                    review_rows.append(
+                        {
+                            "cue_index": before.index,
+                            "start": before.start,
+                            "end": before.end,
+                            "before": before.text,
+                            "after": after.text,
+                        }
+                    )
+            self._set_stage_progress(
+                manifest,
+                stage=STAGE_ADAPTED,
+                current=float(group_index + 1),
+                total=float(max(len(groups), 1)),
+                unit="groups",
+                message=f"Second-pass group {group_index + 1} of {len(groups)}",
+            )
+            self._save_progress(job_dir, manifest)
+
+        self._save_cues_and_cache(adapted_path, rewritten)
+        adapted_srt = job_dir / manifest.artifacts["adapted_srt"]
+        write_srt(adapted_srt, rewritten)
+        self._export_text_artifact(
+            adapted_srt,
+            self._ensure_output_dir_for_manifest(manifest) / manifest.artifacts["adapted_srt"],
+        )
+        atomic_write_json(job_dir / COHERENCE_REVIEW_FILENAME, review_rows)
+        self._append_event(
+            manifest,
+            "info",
+            f"Finished second-pass coherence review with {len(review_rows)} changed lines.",
+            stage=STAGE_ADAPTED,
+        )
+        self._clear_stage_progress(manifest)
+        self._save_manifest(job_dir, manifest)
 
     def _rebuild_english_range_transactional(
         self,

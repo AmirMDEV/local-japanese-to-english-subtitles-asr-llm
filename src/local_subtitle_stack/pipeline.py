@@ -274,6 +274,49 @@ def build_direct_english_rewrite_prompt(
     )
 
 
+def build_coherence_pass_prompt(
+    *,
+    group: list[Cue],
+    source_group: list[Cue],
+    literal_group: list[Cue],
+    current_group: list[Cue],
+    previous_final: list[Cue],
+    next_context: list[Cue],
+    context_notes: str | None,
+    metadata: str,
+) -> str:
+    payload = {
+        "previous_context": [
+            {"index": cue.index, "english": cue.text} for cue in previous_final
+        ],
+        "target_group": [
+            {
+                "index": cue.index,
+                "time": f"{format_timecode(cue.start)} --> {format_timecode(cue.end)}",
+                "japanese": source_group[pos].text if pos < len(source_group) else "",
+                "direct_english_translation": literal_group[pos].text if pos < len(literal_group) else "",
+                "current_context_applied_english": current_group[pos].text,
+            }
+            for pos, cue in enumerate(group)
+        ],
+        "next_context": [{"index": cue.index, "english": cue.text} for cue in next_context],
+    }
+    return (
+        "You are doing a second-pass coherence review of already translated English subtitles.\n"
+        "Goal: make the target English lines flow coherently with the previous and next subtitles.\n"
+        "Rules:\n"
+        "- Keep the same cue count and order.\n"
+        "- Preserve the Japanese meaning and timing alignment.\n"
+        "- Use overall and scene-specific context to fix disjointed wording or wrong topic drift.\n"
+        "- Do not invent new events, add explanations, or merge/split cues.\n"
+        "- If the current line is already correct, return it unchanged.\n"
+        "- Return JSON only in the shape {\"translations\": [\"...\"]}.\n"
+        f"Metadata: {metadata or 'none'}\n"
+        f"Context notes: {context_notes or 'none'}\n"
+        f"Payload:\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n"
+    )
+
+
 def validate_translation_payload(payload: dict[str, Any], expected_count: int) -> list[str]:
     if not isinstance(payload, dict):
         raise ValueError("Model output is not a JSON object.")

@@ -19,6 +19,7 @@ It is made for long videos, batch jobs, and careful subtitle cleanup.
 - Experimental ReazonSpeech k2 Japanese ASR path
 - Direct English translation subtitle pass
 - Context-applied English subtitle pass
+- Optional second-pass coherence review with before/after changed-line review
 - Whole-video helper notes
 - Time-range helper notes
 - Optional reference subtitle track

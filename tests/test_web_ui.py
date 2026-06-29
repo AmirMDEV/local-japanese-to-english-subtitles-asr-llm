@@ -76,6 +76,10 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Selected subtitle lines fill these times automatically" in HTML
     assert "Add time-range context" in HTML
     assert "Retranslate selected time range" in HTML
+    assert "Run second-pass coherence review" in HTML
+    assert "Second-pass changes" in HTML
+    assert "Restore before" in HTML
+    assert "/api/job/coherence-pass" in HTML
     assert "Shift-click selects a continuous range" in HTML
     assert "Pick context-applied" in HTML
     assert "Pick natural" not in HTML

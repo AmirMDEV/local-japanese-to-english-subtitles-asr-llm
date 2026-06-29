@@ -321,6 +321,21 @@ HTML = r"""<!doctype html>
     }
     .range-card textarea { min-height: 76px; }
     .range-card-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+    .change-list { display: grid; gap: 8px; max-height: min(32vh, 360px); overflow: auto; }
+    .change-row {
+      display: grid;
+      grid-template-columns: 96px minmax(0, 1fr) minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: start;
+      padding: 10px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 6px;
+      background: rgba(0,0,0,.14);
+    }
+    .change-row span { min-width: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
+    .change-time { color: var(--muted); font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
+    .change-before { color: var(--muted); }
+    .change-after { color: var(--soft); }
     .section-note { color: var(--muted); margin: 0; }
     textarea {
       min-height: 90px;
@@ -660,6 +675,12 @@ HTML = r"""<!doctype html>
         const end = rows.length ? formatClock(Math.max(...rows.map(row => Number(row.end)))) : noteEnd;
         return post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, start_timecode:start, end_timecode:end, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
       };
+      const runCoherencePass = () => post("/api/job/coherence-pass", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes});
+      const restoreCoherenceChange = change => post("/api/job/line", {
+        job_id:selectedJobId,
+        cue_index:change.cue_index,
+        adapted_english_text:change.before
+      }, () => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob));
       const dropSubtitle = async ev => {
         ev.preventDefault();
         setError("");
@@ -880,8 +901,21 @@ HTML = r"""<!doctype html>
                 e("textarea", {value:context, onChange:ev=>setContext(ev.target.value), placeholder:"Overall video context used in every translation prompt: character names, relationships, tone, slang, setting, story so far"}),
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:saveNotes}, "Save context"),
-                  e("button", {disabled:!selectedJobId, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Retranslate whole job with context")
+                  e("button", {disabled:!selectedJobId, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Retranslate whole job with context"),
+                  e("button", {disabled:!selectedJobId || !includeAdapted, onClick:runCoherencePass}, "Run second-pass coherence review")
                 )
+              )
+            ),
+            e("section", {className:"panel"},
+              e("div", {className:"panel-head"}, e("strong", null, "Second-pass changes"), e("span", null, status.rebuild_running ? "Running" : `${(job?.coherence_review || []).length} changes`)),
+              e("div", {className:"panel-body stack"},
+                e("p", {className:"section-note"}, "After second-pass coherence review, changed context-applied English lines appear here. Click a change to select that subtitle line. Restore before puts that one line back."),
+                job?.coherence_review?.length ? e("div", {className:"change-list"}, job.coherence_review.map(change => e("div", {key:change.cue_index, className:"change-row", onClick:()=>setLine((job.preview || []).find(row => row.cue_index === change.cue_index) || line)},
+                  e("span", {className:"change-time"}, `#${change.cue_index}\n${formatSecondsDisplay(change.start)} - ${formatSecondsDisplay(change.end)}`),
+                  e("span", {className:"change-before"}, change.before),
+                  e("span", {className:"change-after"}, change.after),
+                  e("button", {className:"secondary", onClick:ev=>{ ev.stopPropagation(); restoreCoherenceChange(change); }}, "Restore before")
+                ))) : e("div", {className:"empty"}, "No second-pass changes yet.")
               )
             ),
             e("section", {className:"panel"},
@@ -1228,6 +1262,7 @@ class WebServiceState:
         return {
             "manifest": manifest.to_dict(),
             "preview": self.service.preview_rows(job_id),
+            "coherence_review": self.service.coherence_review(job_id),
             "subtitle_files": subtitle_files,
             "subtitle_file_error": subtitle_error,
         }
@@ -1387,6 +1422,23 @@ class WebServiceState:
         )
         threading.Thread(target=self._drain_rebuild_log, daemon=True).start()
         return {"message": "Redo English started", "pid": self.rebuild_process.pid}
+
+    def coherence_pass(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._running(self.rebuild_process):
+            raise RuntimeError("Redo English is already running.")
+        job_id = str(payload["job_id"])
+        self.save_notes(payload)
+        self.rebuild_log = ""
+        self.rebuild_process = subprocess.Popen(
+            [sys.executable, "-m", "local_subtitle_stack.cli", "coherence-pass", job_id],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+            creationflags=no_window_creationflags(),
+        )
+        threading.Thread(target=self._drain_rebuild_log, daemon=True).start()
+        return {"message": "Second-pass coherence review started", "pid": self.rebuild_process.pid}
 
     def open_target(self, payload: dict[str, Any]) -> dict[str, Any]:
         job_id = str(payload["job_id"])
@@ -1754,6 +1806,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(APP_STATE.attach(payload))
             elif self.path == "/api/job/rebuild":
                 self._send_json(APP_STATE.rebuild(payload))
+            elif self.path == "/api/job/coherence-pass":
+                self._send_json(APP_STATE.coherence_pass(payload))
             elif self.path == "/api/open":
                 self._send_json(APP_STATE.open_target(payload))
             elif self.path == "/api/settings/save":

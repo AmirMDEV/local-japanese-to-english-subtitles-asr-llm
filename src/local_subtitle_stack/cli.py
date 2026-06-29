@@ -77,6 +77,12 @@ def build_parser() -> argparse.ArgumentParser:
     rebuild_range.add_argument("--start", required=True)
     rebuild_range.add_argument("--end", required=True)
 
+    coherence_pass = subparsers.add_parser(
+        "coherence-pass",
+        help="Run second-pass coherence review over context-applied English subtitles.",
+    )
+    coherence_pass.add_argument("job_id")
+
     attach_track = subparsers.add_parser(
         "attach-track",
         help="Attach an existing subtitle file to a job as direct English translation, context-applied English, or reference.",
@@ -220,6 +226,11 @@ def main(argv: list[str] | None = None) -> int:
                 end_timecode=args.end,
             )
             print(f"Rebuilt English for range {args.start} to {args.end} in {manifest.job_id}")
+            return 0
+
+        if args.command == "coherence-pass":
+            manifest = service.run_coherence_pass_from_saved_notes(args.job_id)
+            print(f"Ran second-pass coherence review for {manifest.job_id}")
             return 0
 
         if args.command == "attach-track":

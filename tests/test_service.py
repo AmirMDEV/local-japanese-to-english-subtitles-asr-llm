@@ -250,6 +250,14 @@ class QualityFlagOllama(SuccessfulOllama):
         return {"translations": lines[:count]}
 
 
+class CoherencePassOllama(SuccessfulOllama):
+    def generate_json(self, model: str, prompt: str, temperature: float) -> dict[str, list[str]]:
+        self.calls.append((model, prompt))
+        if "second-pass coherence review" not in prompt:
+            return super().generate_json(model, prompt, temperature)
+        return {"translations": ["coherent line 1", "adapted line 2"]}
+
+
 def build_config(tmp_path: Path) -> AppConfig:
     return AppConfig(
         config_path=str(tmp_path / "config.toml"),
@@ -1035,6 +1043,61 @@ def test_rebuild_without_easy_english_removes_previous_easy_outputs(
     assert not (job_dir / reloaded.artifacts["adapted_srt"]).exists()
     assert not (export_dir / reloaded.artifacts["adapted_srt"]).exists()
     assert all(row["adapted_english"] == "" for row in preview)
+
+
+def test_coherence_pass_updates_adapted_lines_and_records_before_after(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    ollama = CoherencePassOllama()
+    service = build_service(tmp_path, ollama)
+    source = tmp_path / "coherence.ja.srt"
+    write_srt_fixture(
+        source,
+        [
+            ("00:00:01,000", "00:00:02,000", "匂いの話"),
+            ("00:00:02,000", "00:00:03,000", "続きの話"),
+        ],
+    )
+    manifest = service.import_existing(
+        profile="default",
+        primary_subtitle=source,
+        context="They are talking about smell, not furniture.",
+        include_adapted_english=True,
+    )
+    service.rebuild_english(
+        manifest.job_id,
+        batch_label=None,
+        overall_context="They are talking about smell, not furniture.",
+        scene_contexts=[],
+        include_adapted_english=True,
+    )
+
+    service.run_coherence_pass(
+        manifest.job_id,
+        batch_label=None,
+        overall_context="They are talking about smell, not furniture.",
+        scene_contexts=[],
+    )
+
+    preview = service.preview_rows(manifest.job_id)
+    review = service.coherence_review(manifest.job_id)
+    assert preview[0]["adapted_english"] == "coherent line 1"
+    assert preview[1]["adapted_english"] == "adapted line 2"
+    assert review == [
+        {
+            "cue_index": 1,
+            "start": 1.0,
+            "end": 2.0,
+            "before": "adapted line 1",
+            "after": "coherent line 1",
+        }
+    ]
+    prompt = next(prompt for _model, prompt in ollama.calls if "second-pass coherence review" in prompt)
+    assert "They are talking about smell, not furniture." in prompt
+    assert "previous_context" in prompt
+    assert "current_context_applied_english" in prompt
 
 
 def test_range_rebuild_prompt_includes_surrounding_japanese_context(
