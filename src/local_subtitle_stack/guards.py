@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import subprocess
 from dataclasses import dataclass
 
@@ -27,6 +28,15 @@ class ResourceSnapshot:
         return max(self.gpu_total_mb - self.gpu_free_mb, 0)
 
 
+def _parse_nvidia_smi_table_memory(output: str) -> tuple[int, int]:
+    match = re.search(r"(\d+)MiB\s*/\s*(\d+)MiB", output)
+    if not match:
+        return 0, 0
+    used = int(match.group(1))
+    total = int(match.group(2))
+    return max(total - used, 0), total
+
+
 def capture_snapshot() -> ResourceSnapshot:
     memory = psutil.virtual_memory()
     process = psutil.Process()
@@ -50,7 +60,17 @@ def capture_snapshot() -> ResourceSnapshot:
             gpu_free = int(rows[0][0].strip())
             gpu_total = int(rows[0][1].strip())
     except (FileNotFoundError, subprocess.CalledProcessError, IndexError, ValueError):
-        pass
+        try:
+            completed = subprocess.run(
+                ["nvidia-smi"],
+                check=True,
+                capture_output=True,
+                text=True,
+                creationflags=no_window_creationflags(),
+            )
+            gpu_free, gpu_total = _parse_nvidia_smi_table_memory(completed.stdout)
+        except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
+            pass
 
     return ResourceSnapshot(
         free_ram_mb=int(memory.available / 1024 / 1024),

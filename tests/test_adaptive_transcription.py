@@ -15,6 +15,7 @@ from local_subtitle_stack.adaptive_transcription import (
 )
 from local_subtitle_stack.domain import Cue
 from local_subtitle_stack.guards import ResourceSnapshot
+from local_subtitle_stack.guards import _parse_nvidia_smi_table_memory
 
 
 class FakeFFmpeg:
@@ -63,6 +64,12 @@ def test_profile_selection_scales_down_to_available_resources() -> None:
     assert ordered_profile_candidates(balanced, "auto", "downgrade")[0][0].name == "balanced"
     assert ordered_profile_candidates(low_gpu, "auto", "downgrade")[0][0].name == "low_gpu"
     assert ordered_profile_candidates(cpu, "auto", "downgrade")[0][0].name == "cpu_fallback"
+
+
+def test_nvidia_smi_table_memory_fallback_handles_new_driver_output() -> None:
+    output = "|   0  NVIDIA GeForce RTX 3070 ... |    2502MiB /   8192MiB |     23%      Default |"
+
+    assert _parse_nvidia_smi_table_memory(output) == (5690, 8192)
 
 
 def test_all_profiles_keep_multilingual_model_for_japanese() -> None:
