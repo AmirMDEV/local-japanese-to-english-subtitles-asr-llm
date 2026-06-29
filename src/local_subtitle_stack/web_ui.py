@@ -251,6 +251,22 @@ HTML = r"""<!doctype html>
     }
     .job-row.active, .preview-row.active { border-color: var(--accent); }
     .preview-row.selected { background: rgba(255,216,77,.12); border-color: rgba(255,216,77,.55); }
+    .preview-row {
+      grid-template-columns: 136px minmax(0, 1fr);
+      align-items: start;
+      padding: 10px 12px;
+    }
+    .preview-time {
+      color: var(--muted);
+      font-family: Consolas, "Cascadia Mono", monospace;
+      font-size: 12px;
+      line-height: 1.35;
+    }
+    .preview-text {
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.45;
+    }
     .range-card {
       display: grid;
       gap: 8px;
@@ -415,6 +431,7 @@ HTML = r"""<!doctype html>
       const [job, setJob] = React.useState(null);
       const [line, setLine] = React.useState(null);
       const [selectedCueIndexes, setSelectedCueIndexes] = React.useState([]);
+      const [timeDisplay, setTimeDisplay] = React.useState("seconds");
       const [dropRole, setDropRole] = React.useState("direct");
       const [batchLabel, setBatchLabel] = React.useState("");
       const [context, setContext] = React.useState("");
@@ -480,6 +497,25 @@ HTML = r"""<!doctype html>
           refresh();
         });
       };
+      const clearJobs = async mode => {
+        const removable = jobs.filter(row => mode === "finished" ? ["completed", "failed", "paused"].includes(row.status) : row.status !== "working");
+        if (!removable.length) return;
+        const message = mode === "finished" ? "Clear completed, failed, and paused jobs from the list? Exported subtitle files stay on disk." : "Clear every non-running job from the list? Any running job stays. Exported subtitle files stay on disk.";
+        if (!confirm(message)) return;
+        setError("");
+        try {
+          for (const row of removable) await api("/api/job/delete", {job_id:row.job_id});
+          if (removable.some(row => row.job_id === selectedJobId)) {
+            setSelectedJobId("");
+            setJob(null);
+            setLine(null);
+            setSelectedCueIndexes([]);
+          }
+          refresh();
+        } catch (err) {
+          setError(err.message);
+        }
+      };
       const saveLine = () => line && selectedJobId && post("/api/job/line", {
         job_id:selectedJobId,
         cue_index:line.cue_index,
@@ -500,6 +536,18 @@ HTML = r"""<!doctype html>
       const chooseCacheFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, cache_paths:{...current.cache_paths, hf_hub_cache:d.path}}))).catch(err => setError(err.message));
       const chooseAsrFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, models:{...current.models, asr:d.path}}))).catch(err => setError(err.message));
       const selectedPreviewRows = () => (job?.preview || []).filter(row => selectedCueIndexes.includes(row.cue_index));
+      const formatSecondsDisplay = seconds => `${(Math.round((Number(seconds) || 0) * 100) / 100).toFixed(2).replace(/\.?0+$/, "")}s`;
+      const formatClockDisplay = seconds => {
+        const totalMs = Math.max(0, Math.round((Number(seconds) || 0) * 1000));
+        const h = Math.floor(totalMs / 3600000);
+        const m = Math.floor((totalMs % 3600000) / 60000);
+        const s = Math.floor((totalMs % 60000) / 1000);
+        const ms = totalMs % 1000;
+        return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(ms).padStart(3, "0")}`;
+      };
+      const formatPreviewRange = row => timeDisplay === "clock"
+        ? `${formatClockDisplay(row.start)} - ${formatClockDisplay(row.end)}`
+        : `${formatSecondsDisplay(row.start)} - ${formatSecondsDisplay(row.end)}`;
       const rangeFromRows = rows => rows.length ? {
         start: formatClock(Math.min(...rows.map(row => Number(row.start)))),
         end: formatClock(Math.max(...rows.map(row => Number(row.end))))
@@ -640,12 +688,18 @@ HTML = r"""<!doctype html>
             ),
             e("section", {className:"panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Jobs"), e("span", null, status.worker_running ? "Running" : (status.pause_requested ? "Stopping" : "Idle"))),
-              e("div", {className:"panel-body job-list"},
-                jobs.length ? jobs.map(row => e("button", {key:row.job_id, className:`job-row ${row.job_id===selectedJobId?"active":""}`, onClick:()=>setSelectedJobId(row.job_id)},
-                  e("strong", null, row.source),
-                  e("span", {className:"tiny"}, `${row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
-                  e("span", null, jobStepText(row))
-                )) : e("div", {className:"empty"}, "No jobs yet.")
+              e("div", {className:"panel-body stack"},
+                e("div", {className:"job-list"},
+                  jobs.length ? jobs.map(row => e("button", {key:row.job_id, className:`job-row ${row.job_id===selectedJobId?"active":""}`, onClick:()=>setSelectedJobId(row.job_id)},
+                    e("strong", null, row.source),
+                    e("span", {className:"tiny"}, `${row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
+                    e("span", null, jobStepText(row))
+                  )) : e("div", {className:"empty"}, "No jobs yet.")
+                ),
+                e("div", {className:"button-row"},
+                  e("button", {className:"secondary", disabled:!jobs.some(row => ["completed", "failed", "paused"].includes(row.status)), onClick:()=>clearJobs("finished")}, "Clear finished jobs"),
+                  e("button", {className:"danger", disabled:!jobs.some(row => row.status !== "working"), onClick:()=>clearJobs("all")}, "Clear all non-running jobs")
+                )
               )
             ),
             error ? e("section", {className:"panel error"}, e("div", {className:"panel-head"}, e("strong", null, "Error")), e("div", {className:"panel-body"}, e("p", null, error))) : null
@@ -680,14 +734,20 @@ HTML = r"""<!doctype html>
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "Click a line to edit it. Ctrl-click adds separate lines. Shift-click selects a continuous range and fills the time-range context below."),
                 e("div", {className:"field"},
+                  e("label", null, "Time display"),
+                  e("select", {value:timeDisplay, onChange:ev=>setTimeDisplay(ev.target.value)},
+                    [["seconds","Seconds, e.g. 62.5s"],["clock","Hours:minutes:seconds, e.g. 00:01:02.500"]].map(([value,label]) => e("option", {key:value, value}, label))
+                  )
+                ),
+                e("div", {className:"field"},
                   e("label", null, "Dropped subtitle type"),
                   e("select", {value:dropRole, onChange:ev=>setDropRole(ev.target.value)},
                     [["direct","Direct English translation"],["ja","Japanese"],["easy","Context-applied English"],["reference","Reference"]].map(([value,label]) => e("option", {key:value, value}, label))
                   )
                 ),
                 e("div", {className:"preview-list"}, job && job.preview && job.preview.length ? job.preview.map(row => e("button", {key:row.cue_index, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""} ${selectedCueIndexes.includes(row.cue_index)?"selected":""}`, onClick:ev=>toggleCue(row, ev)},
-                  e("strong", null, `#${row.cue_index} ${row.start}s-${row.end}s`),
-                  e("span", null, row.japanese || row.literal_english || row.adapted_english || row.reference || "")
+                  e("span", {className:"preview-time"}, `#${row.cue_index}\n${formatPreviewRange(row)}`),
+                  e("span", {className:"preview-text"}, row.japanese || row.literal_english || row.adapted_english || row.reference || "")
                 )) : e("div", {className:"drop-zone", onDragOver:ev=>ev.preventDefault(), onDrop:dropSubtitle},
                   e("strong", null, "Drop an .srt file here to edit existing subtitles"),
                   e("span", null, selectedJobId ? "Dropped file attaches to the selected job." : "Dropped direct English translation/Japanese subtitles create a new editable job.")

@@ -39,6 +39,11 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Stored on" in HTML
     assert "Blob files" in HTML
     assert "Preview and line editor" in HTML
+    assert "Time display" in HTML
+    assert "Seconds, e.g. 62.5s" in HTML
+    assert "Hours:minutes:seconds, e.g. 00:01:02.500" in HTML
+    assert "preview-time" in HTML
+    assert "preview-text" in HTML
     assert "Transcription and translation models" in HTML
     assert "model-settings-panel" in HTML
     assert "select option" in HTML
@@ -51,6 +56,8 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Attach direct English translation to preview" in HTML
     assert "Check setup" in HTML
     assert "Start processing all jobs" in HTML
+    assert "Clear finished jobs" in HTML
+    assert "Clear all non-running jobs" in HTML
     assert "What to do now" in HTML
     assert "Open direct English translation in Subtitle Edit" in HTML
     assert "Context-applied English" in HTML

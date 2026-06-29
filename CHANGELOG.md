@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Added job-list clearing controls and rebuilt subtitle preview rows so time stays in a left column, subtitle text wraps on the right, selected rows do not overlap, and preview time can switch between seconds and `HH:MM:SS.mmm`.
 - Renamed the existing-subtitle import panel to `Load subtitle files into preview`, clarified that it creates/attaches SRT files for the Preview and line editor, and made attach actions reload the selected job preview.
 - Moved model configuration to the top of the web workflow column, fixed dark dropdown option contrast, and clarified that the Japanese model cache stores Hugging Face ASR/listening files while Gemma/Ollama English models stay in Ollama storage.
 - Expanded the web Models panel so Direct English translation and Context-applied English show their exact Ollama storage root, manifest file, and blob file paths.
