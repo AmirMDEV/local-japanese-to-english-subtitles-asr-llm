@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Added an `Unsaved changes` indicator to model settings so dropdown changes clearly need Save settings before new jobs use them.
 - Fixed web model settings polling so changing the Japanese listening model to Qwen3-ASR no longer jumps back to the saved Kotoba value before Save settings.
 - Clarified the preview line editor boxes with visible labels and short explanations for Japanese source subtitles, direct English translation, context-applied English, and reference subtitles.
 - Added an optional second-pass coherence review for context-applied English subtitles, using saved overall/time-range context plus neighboring subtitle context and showing before/after changed lines in the web UI.

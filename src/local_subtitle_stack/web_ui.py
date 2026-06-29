@@ -138,6 +138,14 @@ HTML = r"""<!doctype html>
     .model-settings-panel .button-row {
       grid-column: 1 / -1;
     }
+    .dirty-pill {
+      color: #0d0f12;
+      background: var(--accent);
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 800;
+    }
     .panel-head {
       display: flex;
       justify-content: space-between;
@@ -515,6 +523,8 @@ HTML = r"""<!doctype html>
       const [settingsDraft, setSettingsDraft] = React.useState(null);
       const [health, setHealth] = React.useState(null);
       const currentSettings = settingsDraft || status.settings || {};
+      const sameJson = (left, right) => JSON.stringify(left || {}) === JSON.stringify(right || {});
+      const settingsDirty = Boolean(settingsDraft && status.settings && (!sameJson(settingsDraft.models, status.settings.models) || !sameJson(settingsDraft.cache_paths, status.settings.cache_paths)));
 
       const refresh = () => api("/api/status").then(data => { setStatus(data); setSettingsDraft(current => current || data.settings); }).catch(err => setError(err.message));
       const refreshModels = () => api("/api/models").then(setModels).catch(err => setError(err.message));
@@ -616,7 +626,8 @@ HTML = r"""<!doctype html>
         api(`/api/job?id=${encodeURIComponent(jobId)}`).then(setJob);
         refresh();
       });
-      const saveSettings = () => settingsDraft && post("/api/settings/save", settingsDraft, data => setSettingsDraft(data));
+      const applySettings = data => { setSettingsDraft(data); setStatus(current => ({...current, settings:data})); };
+      const saveSettings = () => settingsDraft && post("/api/settings/save", settingsDraft, applySettings);
       const chooseSubtitle = key => api("/api/pick-subtitle").then(d => d.path && setImportDraft(current => ({...current, [key]:d.path}))).catch(err => setError(err.message));
       const chooseCacheFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, cache_paths:{...current.cache_paths, hf_hub_cache:d.path}}))).catch(err => setError(err.message));
       const chooseAsrFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, models:{...current.models, asr:d.path}}))).catch(err => setError(err.message));
@@ -991,7 +1002,7 @@ HTML = r"""<!doctype html>
               )
             ),
             e("section", {className:"panel model-settings-panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Transcription and translation models"), e("span", null, "App-wide")),
+              e("div", {className:"panel-head"}, e("strong", null, "Transcription and translation models"), e("span", {className:settingsDirty ? "dirty-pill" : ""}, settingsDirty ? "Unsaved changes" : "App-wide")),
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "Choose the Japanese listening model and English translation models before adding jobs. These settings apply to every new job."),
                 settingsDraft ? e("div", {className:"field"},
@@ -1040,9 +1051,9 @@ HTML = r"""<!doctype html>
                 ) : null,
                 e("div", {className:"button-row"},
                   e("button", {onClick:saveSettings}, "Save settings"),
-                  e("button", {className:"secondary", onClick:()=>post("/api/settings/use-recommended", {}, data=>setSettingsDraft(data))}, "Use Gemma e2b"),
+                  e("button", {className:"secondary", onClick:()=>post("/api/settings/use-recommended", {}, applySettings)}, "Use Gemma e2b"),
                   e("button", {className:"secondary", onClick:()=>post("/api/settings/download-recommended", {})}, "Download Gemma"),
-                  e("button", {className:"danger", onClick:()=>post("/api/settings/reset", {}, data=>setSettingsDraft(data))}, "Defaults")
+                  e("button", {className:"danger", onClick:()=>post("/api/settings/reset", {}, applySettings)}, "Defaults")
                 )
               )
             ),
