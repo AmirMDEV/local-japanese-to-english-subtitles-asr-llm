@@ -585,6 +585,7 @@ HTML = r"""<!doctype html>
       const [notes, setNotes] = React.useState([]);
       const [importDraft, setImportDraft] = React.useState({video:"", primary_subtitle:"", japanese:"", direct:"", easy:"", reference:""});
       const [settingsDraft, setSettingsDraft] = React.useState(null);
+      const [settingsSaving, setSettingsSaving] = React.useState(false);
       const [health, setHealth] = React.useState(null);
       const currentSettings = settingsDraft || status.settings || {};
       const sameJson = (left, right) => JSON.stringify(left || {}) === JSON.stringify(right || {});
@@ -694,10 +695,18 @@ HTML = r"""<!doctype html>
         refresh();
       });
       const applySettings = data => { setSettingsDraft(data); setStatus(current => ({...current, settings:data})); };
-      const saveSettings = () => settingsDraft && post("/api/settings/save", settingsDraft, applySettings);
+      const saveSettingsDraft = next => {
+        setError("");
+        setSettingsDraft(next);
+        setSettingsSaving(true);
+        api("/api/settings/save", next)
+          .then(data => { applySettings(data); refreshModels(); })
+          .catch(err => setError(err.message))
+          .finally(() => setSettingsSaving(false));
+      };
       const chooseSubtitle = key => api("/api/pick-subtitle").then(d => d.path && setImportDraft(current => ({...current, [key]:d.path}))).catch(err => setError(err.message));
-      const chooseCacheFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, cache_paths:{...current.cache_paths, hf_hub_cache:d.path}}))).catch(err => setError(err.message));
-      const chooseAsrFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, models:{...current.models, asr:d.path}}))).catch(err => setError(err.message));
+      const chooseCacheFolder = () => api("/api/pick-folder").then(d => d.path && saveSettingsDraft({...settingsDraft, cache_paths:{...settingsDraft.cache_paths, hf_hub_cache:d.path}})).catch(err => setError(err.message));
+      const chooseAsrFolder = () => api("/api/pick-folder").then(d => d.path && saveSettingsDraft({...settingsDraft, models:{...settingsDraft.models, asr:d.path}})).catch(err => setError(err.message));
       const selectedPreviewRows = () => (job?.preview || []).filter(row => selectedCueIndexes.includes(row.cue_index));
       const formatSecondsDisplay = seconds => `${(Math.round((Number(seconds) || 0) * 100) / 100).toFixed(2).replace(/\.?0+$/, "")}s`;
       const formatClockDisplay = seconds => {
@@ -1074,14 +1083,14 @@ HTML = r"""<!doctype html>
               )
             ),
             e("section", {className:"panel model-settings-panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Transcription and translation models"), e("span", {className:settingsDirty ? "dirty-pill" : ""}, settingsDirty ? "Unsaved changes" : "App-wide")),
+              e("div", {className:"panel-head"}, e("strong", null, "Transcription and translation models"), e("span", {className:settingsSaving || settingsDirty ? "dirty-pill" : ""}, settingsSaving ? "Saving" : (settingsDirty ? "Auto-saving" : "App-wide"))),
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "Choose the Japanese listening model and English translation models before adding jobs. These settings apply to every new job."),
                 settingsDraft ? e("div", {className:"field"},
                   e("label", null, "Japanese listening model"),
                   e("select", {value:settingsDraft.models?.asr || "", onChange:ev => {
                     const chosen = (currentSettings.asr_options || []).find(item => item.model === ev.target.value);
-                    setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, asr:ev.target.value, asr_engine:chosen?.engine || settingsDraft.models.asr_engine}});
+                    saveSettingsDraft({...settingsDraft, models:{...settingsDraft.models, asr:ev.target.value, asr_engine:chosen?.engine || settingsDraft.models.asr_engine}});
                   }},
                     (currentSettings.asr_options || []).map(item => e("option", {key:item.model, value:item.model}, `${item.label} | ${item.model}`))
                   )
@@ -1095,26 +1104,26 @@ HTML = r"""<!doctype html>
                 ) : null,
                 settingsDraft ? e("div", {className:"field"},
                   e("label", null, "Whisper speed profile"),
-                  e("select", {value:settingsDraft.models?.faster_whisper_profile || "auto", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, faster_whisper_profile:ev.target.value}})},
+                  e("select", {value:settingsDraft.models?.faster_whisper_profile || "auto", onChange:ev=>saveSettingsDraft({...settingsDraft, models:{...settingsDraft.models, faster_whisper_profile:ev.target.value}})},
                     (currentSettings.faster_whisper_profiles || []).map(item => e("option", {key:item.value, value:item.value}, item.label))
                   )
                 ) : null,
                 settingsDraft ? e("div", {className:"field"},
                   e("label", null, "Direct English translation model"),
-                  e("select", {value:settingsDraft.models?.literal_translation || "", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, literal_translation:ev.target.value}})},
+                  e("select", {value:settingsDraft.models?.literal_translation || "", onChange:ev=>saveSettingsDraft({...settingsDraft, models:{...settingsDraft.models, literal_translation:ev.target.value}})},
                     (currentSettings.translation_models || []).map(item => e("option", {key:item, value:item}, item || "Default"))
                   )
                 ) : null,
                 settingsDraft ? e("div", {className:"field"},
                   e("label", null, "Context-applied English model"),
-                  e("select", {value:settingsDraft.models?.adapted_translation || "", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, adapted_translation:ev.target.value}})},
+                  e("select", {value:settingsDraft.models?.adapted_translation || "", onChange:ev=>saveSettingsDraft({...settingsDraft, models:{...settingsDraft.models, adapted_translation:ev.target.value}})},
                     (currentSettings.translation_models || []).map(item => e("option", {key:item, value:item}, item || "Default"))
                   )
                 ) : null,
                 settingsDraft ? e("div", {className:"guided-grid"},
                   e("div", {className:"field"},
                     e("label", null, "Japanese model cache"),
-                    e("select", {value:settingsDraft.cache_paths?.hf_hub_cache || "", onChange:ev=>setSettingsDraft({...settingsDraft, cache_paths:{...settingsDraft.cache_paths, hf_hub_cache:ev.target.value}})},
+                    e("select", {value:settingsDraft.cache_paths?.hf_hub_cache || "", onChange:ev=>saveSettingsDraft({...settingsDraft, cache_paths:{...settingsDraft.cache_paths, hf_hub_cache:ev.target.value}})},
                       (currentSettings.cache_options || [""]).map(item => e("option", {key:item || "default", value:item}, item || "Default Hugging Face cache"))
                     ),
                     e("p", {className:"tiny"}, "Downloaded Hugging Face Japanese ASR/listening model files are stored and reused here. This does not copy Gemma/Ollama English models; those stay in the Ollama storage shown in Models.")
@@ -1122,7 +1131,6 @@ HTML = r"""<!doctype html>
                   e("button", {className:"secondary", onClick:chooseCacheFolder}, "Pick cache folder")
                 ) : null,
                 e("div", {className:"button-row"},
-                  e("button", {onClick:saveSettings}, "Save settings"),
                   e("button", {className:"danger", onClick:()=>post("/api/settings/reset", {}, applySettings)}, "Defaults")
                 )
               )
