@@ -90,6 +90,11 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "attachSubtitle" in HTML
     assert "Attach direct English translation to preview" in HTML
     assert "Check setup" in HTML
+    assert "Health and redo log" in HTML
+    assert "diagnostics-grid" in HTML
+    assert "diagnostic-block" in HTML
+    assert 'panel("health"' not in HTML
+    assert 'panel("redo-log"' not in HTML
     assert "Start processing all jobs" in HTML
     assert "Clear finished jobs" in HTML
     assert "Clear all non-running jobs" in HTML

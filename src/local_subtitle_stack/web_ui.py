@@ -482,6 +482,30 @@ HTML = r"""<!doctype html>
     }
     .action-section strong { font-size: 14px; }
     progress { width: 100%; height: 18px; accent-color: var(--accent); margin-top: 14px; }
+    .diagnostics-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+      align-items: stretch;
+    }
+    .diagnostic-block {
+      display: grid;
+      grid-template-rows: auto minmax(220px, 1fr);
+      min-width: 0;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 8px;
+      overflow: clip;
+      background: rgba(0,0,0,.12);
+    }
+    .diagnostic-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .diagnostic-head strong { font-size: 14px; }
     pre {
       white-space: pre-wrap;
       overflow: auto;
@@ -489,7 +513,6 @@ HTML = r"""<!doctype html>
       min-height: 260px;
       margin: 0;
       background: #07111a;
-      border-top: 1px solid var(--line);
       color: #cbd5d7;
       padding: 14px 16px;
       line-height: 1.45;
@@ -525,6 +548,7 @@ HTML = r"""<!doctype html>
       .model-row { grid-template-columns: 1fr; gap: 4px; }
       .model-settings-panel .panel-body { grid-template-columns: 1fr; }
       .two-col { grid-template-columns: 1fr; }
+      .diagnostics-grid { grid-template-columns: 1fr; }
       .guided-grid { grid-template-columns: 1fr; }
       .workflow {
         grid-auto-flow: column;
@@ -1222,11 +1246,21 @@ HTML = r"""<!doctype html>
                   e("button", {className:"danger", onClick:()=>post("/api/settings/reset", {}, applySettings)}, "Defaults")
                 )
             ),
-            panel("health", "", "Health", e("button", {className:"secondary", onClick:()=>api("/api/health").then(setHealth).catch(err=>setError(err.message))}, "Check setup"), "panel-body",
-              e("pre", null, health ? [health.summary, ...(health.checks || []).map(item => `[${item.status}] ${item.name}: ${item.detail}`)].join("\\n") : "Health check output appears here.")
-            ),
-            panel("redo-log", "", "Redo log", e("span", null, status.rebuild_running ? "Live" : "Idle"), "panel-body",
-              e("pre", null, status.rebuild_log || "Redo output appears here.")
+            panel("diagnostics", "", "Health and redo log", e("span", null, status.rebuild_running ? "Redo live" : "Idle"), "panel-body diagnostics-grid",
+              e("div", {className:"diagnostic-block"},
+                e("div", {className:"diagnostic-head"},
+                  e("strong", null, "Health"),
+                  e("button", {className:"secondary", onClick:()=>api("/api/health").then(setHealth).catch(err=>setError(err.message))}, "Check setup")
+                ),
+                e("pre", null, health ? [health.summary, ...(health.checks || []).map(item => `[${item.status}] ${item.name}: ${item.detail}`)].join("\\n") : "Health check output appears here.")
+              ),
+              e("div", {className:"diagnostic-block"},
+                e("div", {className:"diagnostic-head"},
+                  e("strong", null, "Redo log"),
+                  e("span", null, status.rebuild_running ? "Live" : "Idle")
+                ),
+                e("pre", null, status.rebuild_log || "Redo output appears here.")
+              )
             )
           )
         ),
