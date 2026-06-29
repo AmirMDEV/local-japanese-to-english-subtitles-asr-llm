@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Fixed the web model defaults panel order so `Transcription and translation models` stays at the top of the review workflow before jobs and subtitle review panels.
 - Added per-job stop controls in the web UI so a queued job pauses before starting and a running job stops after the next safe checkpoint without pausing the whole queue.
 - Made every web UI section collapsible with saved browser state so long workflow panels can be hidden without losing the current job page.
 - Fixed wrapped web panel headers so long titles and action buttons do not overlap in narrow columns.

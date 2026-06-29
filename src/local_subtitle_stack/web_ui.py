@@ -136,7 +136,7 @@ HTML = r"""<!doctype html>
       min-width: 0;
       overflow: clip;
     }
-    .model-settings-panel { order: -1; }
+    .review-stack > .model-settings-panel { order: -1; }
     .model-settings-panel .panel-body {
       grid-template-columns: minmax(420px, 1.08fr) minmax(360px, .92fr);
       align-items: end;
