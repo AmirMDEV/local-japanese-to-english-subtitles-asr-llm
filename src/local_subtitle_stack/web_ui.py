@@ -612,10 +612,20 @@ HTML = r"""<!doctype html>
     };
     const progressPercent = row => Math.max(0, Math.min(100, Number(row?.stage_progress_percent || row?.overall_progress_percent || 0)));
     const hasLiveProgress = row => Boolean(row && row.stage_progress_message);
+    const progressAgeSeconds = row => Number(row?.progress_age_seconds || 0);
+    const progressAgeLabel = row => row?.progress_age_text ? `${row.progress_age_text} ago` : "No progress timestamp";
+    const progressHealth = row => {
+      if (!row || row.status !== "working" || !row.progress_age_seconds) return "";
+      const age = progressAgeSeconds(row);
+      if (age < 120) return `Likely active | progress saved ${progressAgeLabel(row)}`;
+      if (age < 600) return `Watch | no saved progress for ${row.progress_age_text}`;
+      return `Possible stuck | no saved progress for ${row.progress_age_text}`;
+    };
     const progressPanel = (row, label) => row ? e("div", {className:"progress-card"},
       e("div", {className:"progress-head"}, e("strong", null, label), e("span", null, `${progressPercent(row).toFixed(0)}%`)),
       e("progress", {max:"100", value:progressPercent(row), "aria-label":label}),
-      e("p", {className:"tiny"}, row.stage_progress_message || row.step_text || selectedStageLabel(row))
+      e("p", {className:"tiny"}, row.stage_progress_message || row.step_text || selectedStageLabel(row)),
+      progressHealth(row) ? e("p", {className:"tiny"}, progressHealth(row)) : null
     ) : null;
     const reviewHint = row => {
       if (!row) return "Start at Step 1: choose videos or an existing subtitle file.";
@@ -998,6 +1008,7 @@ HTML = r"""<!doctype html>
               e("button", {className:"job-row", onClick:()=>setSelectedJobId(row.job_id)},
                 e("strong", null, row.source),
                 e("span", {className:"tiny"}, `${row.stop_requested === "true" ? "stopping" : row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
+                progressHealth(row) ? e("span", {className:"tiny"}, progressHealth(row)) : null,
                 e("span", null, jobStepText(row))
               ),
               canStopJob(row) ? e("button", {className:"job-delete", title:"Stop this job after current safe step", "aria-label":`Stop ${row.source} after current safe step`, onClick:()=>stopJob(row.job_id)}, "Stop") : null,

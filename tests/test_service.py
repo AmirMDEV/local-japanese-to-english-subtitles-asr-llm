@@ -1401,6 +1401,9 @@ def test_status_rows_include_stage_and_overall_progress(monkeypatch: pytest.Monk
     assert row["overall_progress_percent"] == "10.00"
     assert row["stage_eta_seconds"] == "600.00"
     assert row["stage_progress_message"] == "Audio chunk 2 of 4"
+    assert row["progress_updated_at"]
+    assert row["progress_age_seconds"].isdigit()
+    assert row["progress_age_text"]
 
 
 def test_completed_job_status_can_show_active_second_pass_progress(

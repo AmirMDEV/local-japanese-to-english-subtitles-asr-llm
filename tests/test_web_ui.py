@@ -133,6 +133,10 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Second-pass coherence review progress" in HTML
     assert "Running step progress" in HTML
     assert "stage_progress_message" in HTML
+    assert "progress_age_seconds" in HTML
+    assert "Likely active" in HTML
+    assert "Possible stuck" in HTML
+    assert "No progress timestamp" in HTML
     assert "progress_stage" in HTML
     assert "Second-pass changes" in HTML
     assert "Restore before" in HTML

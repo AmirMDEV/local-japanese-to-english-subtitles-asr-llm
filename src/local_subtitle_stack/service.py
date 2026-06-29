@@ -385,6 +385,7 @@ class WorkerService:
         rows: list[dict[str, str]] = []
         for job_dir, manifest, state in self.store.list_jobs():
             progress = manifest.current_progress
+            progress_age_seconds = elapsed_seconds_since(progress.updated_at) if progress is not None else None
             latest_event = manifest.events[-1] if manifest.events else None
             rows.append(
                 {
@@ -404,6 +405,9 @@ class WorkerService:
                         else ""
                     ),
                     "stage_progress_message": progress.message if progress is not None and progress.message else "",
+                    "progress_updated_at": progress.updated_at if progress is not None else "",
+                    "progress_age_seconds": f"{progress_age_seconds:.0f}" if progress_age_seconds is not None else "",
+                    "progress_age_text": format_duration_compact(progress_age_seconds) if progress_age_seconds is not None else "",
                     "source_kind": manifest.source_kind,
                     "translation_source_role": manifest.translation_source_role,
                     "has_reference": "true" if manifest.imported_tracks.get("reference") else "false",
