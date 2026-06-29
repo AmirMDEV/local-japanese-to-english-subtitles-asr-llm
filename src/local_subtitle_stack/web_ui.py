@@ -223,6 +223,27 @@ HTML = r"""<!doctype html>
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .tiny { color: var(--muted); font-size: 12px; }
     .guided-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+    .workflow {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .workflow-step {
+      min-width: 0;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,.04);
+    }
+    .workflow-step strong { display: block; font-size: 13px; }
+    .workflow-step span { display: block; color: var(--muted); font-size: 12px; line-height: 1.35; margin-top: 4px; }
+    .review-box {
+      border: 1px solid rgba(255,216,77,.38);
+      background: rgba(255,216,77,.08);
+      border-radius: 8px;
+      padding: 10px 12px;
+    }
     progress { width: 100%; height: 18px; accent-color: var(--accent); margin-top: 14px; }
     pre {
       white-space: pre-wrap;
@@ -251,6 +272,7 @@ HTML = r"""<!doctype html>
     a { color: var(--accent); }
     @media (max-width: 980px) {
       .layout { grid-template-columns: 1fr; }
+      .workflow { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .topbar { grid-template-columns: 1fr; }
       .topbar .button-row { justify-content: flex-start; }
     }
@@ -263,6 +285,7 @@ HTML = r"""<!doctype html>
       .model-row { grid-template-columns: 1fr; gap: 4px; }
       .two-col { grid-template-columns: 1fr; }
       .guided-grid { grid-template-columns: 1fr; }
+      .workflow { grid-template-columns: 1fr; }
       pre { min-height: 180px; }
     }
   </style>
@@ -292,6 +315,20 @@ HTML = r"""<!doctype html>
       if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
       if (parts.length === 2) return parts[0] * 60 + parts[1];
       return Number(value) || 0;
+    };
+    const stageLabel = stage => ({
+      extract: "Prepare audio",
+      transcribe: "Transcribe source language",
+      literal: "Translate to direct English",
+      adapted: "Improve English wording",
+      finalize: "Save subtitle files"
+    })[stage] || (stage || "Not started");
+    const reviewHint = row => {
+      if (!row) return "Start at Step 1: choose videos or an existing subtitle file.";
+      if (row.status === "completed") return "Review output now: open the subtitle lines below, edit any bad line, or open the saved files.";
+      if (row.status === "failed") return "This job failed. Read the latest message, then use Run this job again.";
+      if (row.status === "queued") return "Queued. Press Start processing all jobs when ready.";
+      return `Now doing: ${stageLabel(row.stage)}. Wait, or press Stop after current safe step.`;
     };
 
     function App() {
@@ -395,15 +432,37 @@ HTML = r"""<!doctype html>
       };
       const jobs = status.jobs || [];
       const selectedRow = jobs.find(row => row.job_id === selectedJobId);
+      const modelText = selectedRow?.current_model || "No model active now";
+      const outputButtons = [
+        ["ja", "Open Japanese subtitles"],
+        ["direct", "Open direct English subtitles"],
+        ["easy", "Open natural English subtitles"],
+        ["direct-partial", "Open direct draft"],
+        ["easy-partial", "Open natural draft"]
+      ];
+      const workflowSteps = [
+        ["1", "Choose input", "Pick videos, folder, or existing subtitles."],
+        ["2", "Choose models", "Select listening and English models."],
+        ["3", "Add context", "Tell the translator names, tone, slang, scene meaning."],
+        ["4", "Start", "Queue work and let the app process it."],
+        ["5", "Review", "Open subtitle lines, edit text, or add context to selected lines."],
+        ["6", "Export", "Open saved subtitles or Subtitle Edit."]
+      ];
 
       return e(React.Fragment, null,
         e("header", {className:"topbar"},
           e("div", null, e("h1", null, "Fast Multilanguage Transcriber"), e("p", null, "Local folder and file transcription using the existing adaptive runner.")),
           e("div", {className:"button-row"},
             e("button", {className:"secondary", onClick:refresh}, "Refresh"),
-            e("button", {onClick:()=>post("/api/worker/start", {})}, "Start queue"),
-            e("button", {className:"danger", onClick:()=>post("/api/worker/stop", {})}, "Stop safely")
+            e("button", {onClick:()=>post("/api/worker/start", {})}, "Start processing all jobs"),
+            e("button", {className:"danger", onClick:()=>post("/api/worker/stop", {})}, "Stop after current step")
           )
+        ),
+        e("section", {className:"workflow"},
+          workflowSteps.map(([number, title, text]) => e("div", {className:"workflow-step", key:number},
+            e("strong", null, `${number}. ${title}`),
+            e("span", null, text)
+          ))
         ),
         e("div", {className:"layout"},
           e("div", {className:"stack"},
@@ -438,9 +497,9 @@ HTML = r"""<!doctype html>
                   )
                 ),
                 e("div", {className:"button-row"},
-                  e("button", {onClick:enqueueAndStart, disabled:!targets.length}, "Queue and start"),
-                  e("button", {className:"secondary", onClick:enqueueOnly, disabled:!targets.length}, "Queue only"),
-                  e("button", {className:"secondary", onClick:()=>setTargets([]), disabled:!targets.length}, "Clear")
+                  e("button", {onClick:enqueueAndStart, disabled:!targets.length}, "Add files and start processing"),
+                  e("button", {className:"secondary", onClick:enqueueOnly, disabled:!targets.length}, "Add files but do not start yet"),
+                  e("button", {className:"secondary", onClick:()=>setTargets([]), disabled:!targets.length}, "Clear chosen files")
                 ),
                 targets.length
                   ? e("div", {className:"target-list"}, targets.map((path, index) => e("div", {className:"item", key:path}, e("span", null, `Source ${index + 1}`), e("span", {className:"path"}, path))))
@@ -463,18 +522,20 @@ HTML = r"""<!doctype html>
             e("section", {className:"panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Selected job"), e("span", null, selectedRow ? selectedRow.status : "None")),
               e("div", {className:"panel-body stack"},
+                e("div", {className:"review-box"}, e("strong", null, "What to do now"), e("p", null, reviewHint(selectedRow))),
                 selectedRow ? e("div", {className:"status-grid"},
-                  e("div", {className:"metric"}, e("span", null, "Stage"), e("strong", null, selectedRow.stage || "-")),
+                  e("div", {className:"metric"}, e("span", null, "Current step"), e("strong", null, stageLabel(selectedRow.stage))),
                   e("div", {className:"metric"}, e("span", null, "Progress"), e("strong", null, `${selectedRow.overall_progress_percent || 0}%`)),
-                  e("div", {className:"metric"}, e("span", null, "Model"), e("strong", null, selectedRow.current_model || "-"))
+                  e("div", {className:"metric"}, e("span", null, "Model in use"), e("strong", null, modelText))
                 ) : e("div", {className:"empty"}, "Select a job."),
                 e("div", {className:"button-row"},
-                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/job/retry", {job_id:selectedJobId})}, "Retry"),
-                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"folder"})}, "Open folder"),
-                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"review"})}, "Subtitle Edit")
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/job/retry", {job_id:selectedJobId})}, "Run this job again"),
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"folder"})}, "Open subtitle folder"),
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"review"})}, "Open in Subtitle Edit")
                 ),
+                e("p", {className:"section-note"}, "Open saved subtitle files for review. Draft files appear while a rerun is still in progress."),
                 e("div", {className:"button-row"},
-                  ["ja","direct","easy","direct-partial","easy-partial"].map(kind => e("button", {key:kind, className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:kind})}, kind))
+                  outputButtons.map(([kind, label]) => e("button", {key:kind, className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:kind})}, label))
                 )
               )
             ),
