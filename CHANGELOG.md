@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Clarified the web line editor so Direct English translation is read-only reference text, while Context-applied English is the editable final subtitle and auto-saves after typing.
 - Fixed web second-pass change rows so clicking a changed line selects it, highlights the matching subtitle preview row, and opens the editable line fields.
 - Changed web model settings to auto-save immediately when dropdowns or picker buttons change, removing the manual `Save settings` button.
 - Added live web progress bars for running steps, including second-pass coherence review progress by subtitle group.

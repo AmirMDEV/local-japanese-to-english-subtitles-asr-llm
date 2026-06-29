@@ -411,6 +411,7 @@ HTML = r"""<!doctype html>
       resize: vertical;
       font: inherit;
     }
+    textarea[readonly] { color: var(--muted); background: rgba(255,255,255,.035); }
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .tiny { color: var(--muted); font-size: 12px; }
     .guided-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
@@ -577,6 +578,8 @@ HTML = r"""<!doctype html>
       const [selectedCueIndexes, setSelectedCueIndexes] = React.useState([]);
       const [timeDisplay, setTimeDisplay] = React.useState("seconds");
       const [dropRole, setDropRole] = React.useState("direct");
+      const [lineSaveStatus, setLineSaveStatus] = React.useState("");
+      const lineSaveTimer = React.useRef(null);
       const [batchLabel, setBatchLabel] = React.useState("");
       const [context, setContext] = React.useState("");
       const [noteStart, setNoteStart] = React.useState("");
@@ -621,6 +624,10 @@ HTML = r"""<!doctype html>
         }, 1500);
         return () => clearInterval(id);
       }, [selectedJobId]);
+      React.useEffect(() => {
+        setLineSaveStatus("");
+        if (lineSaveTimer.current) clearTimeout(lineSaveTimer.current);
+      }, [selectedJobId, line?.cue_index]);
 
       const pickFolder = () => { setError(""); api("/api/pick-folder").then(d => d.path && setTargets([d.path])).catch(err => setError(err.message)); };
       const pickFiles = () => { setError(""); api("/api/pick-files").then(d => d.paths?.length && setTargets(d.paths)).catch(err => setError(err.message)); };
@@ -687,6 +694,26 @@ HTML = r"""<!doctype html>
         adapted_english_text:line.has_adapted_english ? line.adapted_english : null,
         reference_text:line.has_reference ? line.reference : null
       }, () => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob));
+      const editAdaptedLine = value => {
+        if (!line) return;
+        const nextLine = {...line, adapted_english:value};
+        setLine(nextLine);
+        if (lineSaveTimer.current) clearTimeout(lineSaveTimer.current);
+        if (!selectedJobId || !nextLine.has_adapted_english) return;
+        if (!value.trim()) {
+          setLineSaveStatus("Not saved: context-applied English cannot be empty.");
+          return;
+        }
+        setLineSaveStatus("Saving context-applied English...");
+        lineSaveTimer.current = setTimeout(() => {
+          api("/api/job/line", {job_id:selectedJobId, cue_index:nextLine.cue_index, adapted_english_text:value})
+            .then(() => {
+              setLineSaveStatus("Saved to context-applied subtitle.");
+              setJob(current => current ? {...current, preview:(current.preview || []).map(row => row.cue_index === nextLine.cue_index ? {...row, adapted_english:value} : row)} : current);
+            })
+            .catch(err => { setError(err.message); setLineSaveStatus("Save failed."); });
+        }, 700);
+      };
       const importExisting = () => post("/api/import-existing", {profile, ...importDraft, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast}, selectNewJob);
       const attachSubtitle = (role, key) => post("/api/job/attach", {job_id:selectedJobId, role, path:importDraft[key]}, data => {
         const jobId = data?.job_id || selectedJobId;
@@ -1006,13 +1033,14 @@ HTML = r"""<!doctype html>
                   ),
                   e("label", {className:"line-edit-field"},
                     e("strong", null, "Direct English translation"),
-                    e("span", null, "Closest English meaning, kept fairly literal. Use this to check what the line says."),
-                    e("textarea", {value:line.literal_english || "", onChange:ev=>setLine({...line, literal_english:ev.target.value}), placeholder:"Direct English translation"})
+                    e("span", null, "Read-only model output. Use this to check the meaning; edit the context-applied subtitle below for the final file."),
+                    e("textarea", {value:line.literal_english || "", readOnly:true, placeholder:"Direct English translation"})
                   ),
                   e("label", {className:"line-edit-field"},
                     e("strong", null, "Context-applied English"),
-                    e("span", null, "Final smoother subtitle line after context is applied. This is usually the version you review and export."),
-                    e("textarea", {value:line.adapted_english || "", onChange:ev=>setLine({...line, adapted_english:ev.target.value}), placeholder:"Context-applied English"})
+                    e("span", null, "Final subtitle text. Edits here auto-save to the context-applied English subtitle file after you stop typing."),
+                    e("textarea", {value:line.adapted_english || "", onChange:ev=>editAdaptedLine(ev.target.value), placeholder:"Context-applied English"}),
+                    lineSaveStatus ? e("span", {className:"tiny"}, lineSaveStatus) : null
                   ),
                   e("label", {className:"line-edit-field"},
                     e("strong", null, "Reference subtitles"),
