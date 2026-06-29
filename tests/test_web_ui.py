@@ -44,7 +44,11 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "select option" in HTML
     assert "Downloaded Hugging Face Japanese ASR/listening model files are stored and reused here" in HTML
     assert "does not copy Gemma/Ollama English models" in HTML
-    assert "Load existing subtitles" in HTML
+    assert "Load subtitle files into preview" in HTML
+    assert "Create preview job" in HTML
+    assert "appears in Preview and line editor" in HTML
+    assert "attachSubtitle" in HTML
+    assert "Attach direct English translation to preview" in HTML
     assert "Check setup" in HTML
     assert "Start processing all jobs" in HTML
     assert "What to do now" in HTML
@@ -61,6 +65,7 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Shift-click selects a continuous range" in HTML
     assert "Pick context-applied" in HTML
     assert "Pick natural" not in HTML
+    assert "Natural English SRT" not in HTML
     assert "Series or project name" in HTML
     assert "Drop an .srt file here to edit existing subtitles" in HTML
     assert "/api/upload-subtitle" in HTML

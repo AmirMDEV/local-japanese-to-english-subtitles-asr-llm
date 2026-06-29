@@ -489,6 +489,12 @@ HTML = r"""<!doctype html>
         reference_text:line.has_reference ? line.reference : null
       }, () => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob));
       const importExisting = () => post("/api/import-existing", {profile, ...importDraft, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast}, selectNewJob);
+      const attachSubtitle = (role, key) => post("/api/job/attach", {job_id:selectedJobId, role, path:importDraft[key]}, data => {
+        const jobId = data?.job_id || selectedJobId;
+        setSelectedJobId(jobId);
+        api(`/api/job?id=${encodeURIComponent(jobId)}`).then(setJob);
+        refresh();
+      });
       const saveSettings = () => settingsDraft && post("/api/settings/save", settingsDraft, data => setSettingsDraft(data));
       const chooseSubtitle = key => api("/api/pick-subtitle").then(d => d.path && setImportDraft(current => ({...current, [key]:d.path}))).catch(err => setError(err.message));
       const chooseCacheFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, cache_paths:{...current.cache_paths, hf_hub_cache:d.path}}))).catch(err => setError(err.message));
@@ -816,9 +822,9 @@ HTML = r"""<!doctype html>
               )
             ),
             e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Load existing subtitles"), e("button", {className:"secondary", onClick:importExisting}, "Create job from these files")),
+              e("div", {className:"panel-head"}, e("strong", null, "Load subtitle files into preview"), e("button", {className:"secondary", onClick:importExisting}, "Create preview job")),
               e("div", {className:"panel-body stack"},
-                e("p", {className:"section-note"}, "Use this when subtitles already exist. Add a video plus Japanese/English SRT files, or attach one SRT to the selected job."),
+                e("p", {className:"section-note"}, "Use this when you already have SRT files. Create a preview job from them, or attach one SRT to the selected job so it appears in Preview and line editor. After loading, select lines there and add time-range context to retranslate only that part."),
                 e("div", {className:"guided-grid"},
                   e("input", {value:importDraft.video || "", readOnly:true, placeholder:"Video file to link"}),
                   e("button", {className:"secondary", onClick:()=>api("/api/pick-files").then(d => d.paths?.[0] && setImportDraft({...importDraft, video:d.paths[0]})).catch(err=>setError(err.message))}, "Pick video")
@@ -840,11 +846,11 @@ HTML = r"""<!doctype html>
                   e("button", {className:"secondary", onClick:()=>chooseSubtitle("reference")}, "Pick reference")
                 ),
                 e("div", {className:"button-row"}, [
-                  ["ja", "japanese", "Attach Japanese"],
-                  ["direct", "direct", "Attach direct English translation"],
-                  ["easy", "easy", "Attach context-applied English"],
-                  ["reference", "reference", "Attach reference"]
-                ].map(([role, key, label]) => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[key], onClick:()=>post("/api/job/attach", {job_id:selectedJobId, role, path:importDraft[key]})}, label)))
+                  ["ja", "japanese", "Attach Japanese to preview"],
+                  ["direct", "direct", "Attach direct English translation to preview"],
+                  ["easy", "easy", "Attach context-applied English to preview"],
+                  ["reference", "reference", "Attach reference to preview"]
+                ].map(([role, key, label]) => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[key], onClick:()=>attachSubtitle(role, key)}, label)))
               )
             ),
             e("section", {className:"panel"},
