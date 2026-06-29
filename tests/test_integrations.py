@@ -75,6 +75,37 @@ def test_ollama_client_does_not_auto_start_for_remote_host(monkeypatch: pytest.M
         client.list_models()
 
 
+def test_ollama_client_reports_model_storage_and_details(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fake_request(method: str, url: str, timeout: float, **kwargs):
+        assert url.endswith("/api/tags")
+        return FakeResponse(
+            {
+                "models": [
+                    {
+                        "name": "gemma:e2b",
+                        "size": 4_400_000_000,
+                        "digest": "abc123",
+                        "modified_at": "2026-06-29T12:00:00Z",
+                    }
+                ]
+            }
+        )
+
+    monkeypatch.setenv("OLLAMA_MODELS", str(tmp_path / "ollama-models"))
+    monkeypatch.setattr("local_subtitle_stack.integrations.requests.request", fake_request)
+
+    client = OllamaClient()
+
+    assert client.model_storage_root() == str(tmp_path / "ollama-models")
+    assert client.list_model_details()["gemma:e2b"]["size"] == 4_400_000_000
+
+
+def test_ollama_client_reports_remote_model_host() -> None:
+    client = OllamaClient(base_url="http://192.168.0.6:11434")
+
+    assert client.model_storage_root() == "Remote Ollama host: 192.168.0.6"
+
+
 def test_reazonspeech_k2_missing_dependency_has_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:
     real_import = builtins.__import__
 

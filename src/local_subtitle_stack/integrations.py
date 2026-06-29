@@ -533,6 +533,25 @@ class OllamaClient:
         payload = response.json()
         return [item["name"] for item in payload.get("models", [])]
 
+    def model_storage_root(self) -> str:
+        hostname = (urlparse(self.base_url).hostname or "").strip().lower()
+        if hostname not in {"127.0.0.1", "localhost", "::1"}:
+            return f"Remote Ollama host: {hostname or self.base_url}"
+        return os.environ.get("OLLAMA_MODELS") or str(Path.home() / ".ollama" / "models")
+
+    def list_model_details(self) -> dict[str, dict[str, Any]]:
+        response = self._request("GET", "/api/tags", timeout=30)
+        payload = response.json()
+        return {
+            item["name"]: {
+                "size": item.get("size"),
+                "digest": item.get("digest", ""),
+                "modified_at": item.get("modified_at", ""),
+            }
+            for item in payload.get("models", [])
+            if item.get("name")
+        }
+
     def pull_model(self, model: str) -> None:
         response = self._request(
             "POST",

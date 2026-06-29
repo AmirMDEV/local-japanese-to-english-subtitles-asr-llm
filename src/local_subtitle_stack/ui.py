@@ -438,6 +438,7 @@ class SubtitleStackApp(tk.Tk):
         self.literal_model_var = tk.StringVar(value=self.service.config.models.literal_translation)
         self.adapted_model_var = tk.StringVar(value=self.service.config.models.adapted_translation)
         self.ollama_model_values = self._ollama_model_values()
+        self.model_storage_var = tk.StringVar(value="")
         self.hf_cache_var = tk.StringVar(value=self.service.config.cache_paths.hf_hub_cache or "")
         self.batch_label_var = tk.StringVar()
         self.recursive_var = tk.BooleanVar(value=False)
@@ -775,6 +776,14 @@ class SubtitleStackApp(tk.Tk):
             style="Hint.TLabel",
             wraplength=1250,
         ).grid(row=8, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
+        ttk.Label(
+            inner,
+            textvariable=self.model_storage_var,
+            style="Hint.TLabel",
+            wraplength=1250,
+            justify=tk.LEFT,
+        ).grid(row=9, column=0, columnspan=4, sticky=tk.W, pady=(8, 0))
+        self.refresh_model_storage_summary()
 
     def _ollama_model_values(self) -> list[str]:
         try:
@@ -793,11 +802,56 @@ class SubtitleStackApp(tk.Tk):
         self.ollama_model_values = self._ollama_model_values()
         self.literal_model_box.configure(values=self.ollama_model_values)
         self.adapted_model_box.configure(values=self.ollama_model_values)
+        self.refresh_model_storage_summary()
         self.status_var.set(f"Found {len(self.ollama_model_values)} Ollama model option(s)")
+
+    def refresh_model_storage_summary(self) -> None:
+        self.model_storage_var.set(self._model_storage_summary())
+
+    def _model_storage_summary(self) -> str:
+        ollama = getattr(self.service, "ollama", None)
+        hf_cache = self.hf_cache_var.get().strip() or "Default Hugging Face cache"
+        if ollama is None:
+            return f"Japanese model cache: {hf_cache}"
+        root = ollama.model_storage_root()
+        try:
+            details = ollama.list_model_details()
+        except Exception:
+            details = {}
+        direct = self._ollama_model_line("Direct English", self.literal_model_var.get(), details)
+        natural = self._ollama_model_line("Natural English", self.adapted_model_var.get(), details)
+        return "\n".join(
+            [
+                f"Ollama model storage: {root}",
+                direct,
+                natural,
+                f"Japanese model cache: {hf_cache}",
+            ]
+        )
+
+    def _ollama_model_line(self, label: str, model: str, details: dict[str, dict[str, object]]) -> str:
+        model = model.strip()
+        if not model:
+            return f"{label}: not set"
+        detail = details.get(model)
+        if not detail:
+            return f"{label}: {model} (not found in current Ollama list)"
+        size = detail.get("size")
+        suffix = f", {self._format_bytes(int(size))}" if isinstance(size, int) else ""
+        return f"{label}: {model}{suffix}"
+
+    def _format_bytes(self, value: int) -> str:
+        size = float(value)
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size < 1024 or unit == "TB":
+                return f"{size:.1f} {unit}" if unit != "B" else f"{value} B"
+            size /= 1024
+        return f"{value} B"
 
     def use_recommended_translation_model(self) -> None:
         self.literal_model_var.set(RECOMMENDED_TRANSLATION_MODEL)
         self.adapted_model_var.set(RECOMMENDED_TRANSLATION_MODEL)
+        self.refresh_model_storage_summary()
         self.status_var.set("Gemma e2b selected for direct and natural English")
 
     def download_recommended_translation_model(self) -> None:
@@ -1263,6 +1317,7 @@ class SubtitleStackApp(tk.Tk):
         )
         save_config(self.service.config)
         self._sync_model_setting_vars()
+        self.refresh_model_storage_summary()
         self.status_var.set("Saved the app-wide model settings")
 
     def reset_model_settings_defaults(self) -> None:

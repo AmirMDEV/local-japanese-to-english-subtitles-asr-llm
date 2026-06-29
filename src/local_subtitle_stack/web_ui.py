@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from .config import load_config
+from .integrations import OllamaClient
 from .utils import VIDEO_EXTENSIONS, no_window_creationflags
 
 
@@ -176,6 +178,17 @@ HTML = r"""<!doctype html>
     }
     .metric span { color: var(--muted); display: block; font-size: 12px; }
     .metric strong { display: block; font-size: clamp(20px, 3vw, 32px); margin-top: 2px; }
+    .model-list { display: grid; gap: 8px; }
+    .model-row {
+      display: grid;
+      grid-template-columns: 150px minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+      padding: 8px 0;
+      border-top: 1px solid rgba(255,255,255,.06);
+    }
+    .model-row:first-child { border-top: 0; padding-top: 0; }
+    .model-row span:first-child { color: var(--muted); font-size: 12px; font-weight: 700; }
     progress { width: 100%; height: 18px; accent-color: var(--accent); margin-top: 14px; }
     pre {
       white-space: pre-wrap;
@@ -213,6 +226,7 @@ HTML = r"""<!doctype html>
       .control-span-12, .control-span-6, .control-span-4, .control-span-3 { grid-column: 1; }
       .button-row button, .button-row select { flex: 1 1 150px; }
       .status-grid { grid-template-columns: 1fr; }
+      .model-row { grid-template-columns: 1fr; gap: 4px; }
       pre { min-height: 180px; }
     }
   </style>
@@ -236,11 +250,13 @@ HTML = r"""<!doctype html>
       const [profile, setProfile] = React.useState("low_gpu");
       const [recursive, setRecursive] = React.useState(true);
       const [status, setStatus] = React.useState({running:false, completed:0, total:0, log:""});
+      const [models, setModels] = React.useState({storage:"", hf_cache:"", selected:[]});
       const [error, setError] = React.useState("");
       const [manualPath, setManualPath] = React.useState("");
 
       const refresh = () => api("/api/status").then(setStatus).catch(err => setError(err.message));
-      React.useEffect(() => { refresh(); const id = setInterval(refresh, 1500); return () => clearInterval(id); }, []);
+      const refreshModels = () => api("/api/models").then(setModels).catch(err => setError(err.message));
+      React.useEffect(() => { refresh(); refreshModels(); const id = setInterval(refresh, 1500); return () => clearInterval(id); }, []);
 
       const pickFolder = () => { setError(""); api("/api/pick-folder").then(d => d.path && setTargets([d.path])).catch(err => setError(err.message)); };
       const pickFiles = () => { setError(""); api("/api/pick-files").then(d => d.paths?.length && setTargets(d.paths)).catch(err => setError(err.message)); };
@@ -310,6 +326,14 @@ HTML = r"""<!doctype html>
                 ),
                 e("progress", {value:status.completed || 0, max:status.total || 1}),
                 status.current ? e("p", {className:"path"}, status.current) : e("p", null, "No active file.")
+              )
+            ),
+            e("section", {className:"panel"},
+              e("div", {className:"panel-head"}, e("strong", null, "Models"), e("button", {className:"secondary", onClick:refreshModels}, "Refresh")),
+              e("div", {className:"panel-body model-list"},
+                e("div", {className:"model-row"}, e("span", null, "Ollama storage"), e("span", {className:"path"}, models.storage || "Unknown"), e("span", null, "")),
+                (models.selected || []).map(item => e("div", {className:"model-row", key:item.label}, e("span", null, item.label), e("span", {className:"path"}, item.name), e("span", null, item.size || "Not installed"))),
+                e("div", {className:"model-row"}, e("span", null, "Japanese cache"), e("span", {className:"path"}, models.hf_cache || "Default Hugging Face cache"), e("span", null, ""))
               )
             ),
             e("section", {className:"panel"},
@@ -453,6 +477,42 @@ class WebTranscriberState:
 STATE = WebTranscriberState()
 
 
+def format_bytes(value: int) -> str:
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{value} B"
+        size /= 1024
+    return f"{value} B"
+
+
+def model_storage_snapshot() -> dict[str, Any]:
+    config = load_config()
+    ollama = OllamaClient(executable_path=config.tools.ollama)
+    try:
+        details = ollama.list_model_details()
+    except Exception:
+        details = {}
+
+    def selected(label: str, name: str) -> dict[str, str]:
+        detail = details.get(name)
+        size = detail.get("size") if detail else None
+        return {
+            "label": label,
+            "name": name,
+            "size": format_bytes(int(size)) if isinstance(size, int) else "",
+        }
+
+    return {
+        "storage": ollama.model_storage_root(),
+        "hf_cache": config.cache_paths.hf_hub_cache,
+        "selected": [
+            selected("Direct English", config.models.literal_translation),
+            selected("Natural English", config.models.adapted_translation),
+        ],
+    }
+
+
 def _run_windows_picker(script: str) -> list[str]:
     completed = subprocess.run(
         ["powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script],
@@ -514,6 +574,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(HTML)
         elif path == "/api/status":
             self._send_json(STATE.snapshot())
+        elif path == "/api/models":
+            self._send_json(model_storage_snapshot())
         elif path == "/api/pick-folder":
             self._send_json({"path": pick_folder()})
         elif path == "/api/pick-files":
