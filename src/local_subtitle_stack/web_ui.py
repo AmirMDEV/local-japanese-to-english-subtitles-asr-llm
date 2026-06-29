@@ -18,7 +18,7 @@ import psutil
 from .app import build_service
 from .asr_models import ranked_asr_candidates
 from .config import CachePaths, ModelConfig, load_config, save_config
-from .domain import SceneContextBlock
+from .domain import JOB_STATUS_WORKING, SceneContextBlock
 from .integrations import OllamaClient
 from .queue import QueueError
 from .utils import VIDEO_EXTENSIONS, no_window_creationflags
@@ -755,7 +755,12 @@ HTML = r"""<!doctype html>
       };
       const deleteSelectedJob = () => deleteJob(selectedJobId);
       const canStopJob = row => row && ["working", "queued"].includes(row.status) && row.stop_requested !== "true";
+      const canResumeJob = row => Boolean(row && ["queued", "paused", "failed", "working"].includes(row.status));
       const stopJob = jobId => post("/api/job/stop", {job_id:jobId}, () => refresh()).catch(err=>setError(err.message));
+      const resumeJob = jobId => post("/api/job/resume", {job_id:jobId}, data => {
+        if (data?.job_id) setSelectedJobId(data.job_id);
+        refresh();
+      }).catch(err=>setError(err.message));
       const clearJobs = async mode => {
         const removable = jobs.filter(row => mode === "finished" ? ["completed", "failed", "paused"].includes(row.status) : row.status !== "working");
         if (!removable.length) return;
@@ -1068,7 +1073,7 @@ HTML = r"""<!doctype html>
                 ) : e("div", {className:"empty"}, "Select a job."),
                 hasLiveProgress(selectedRow) ? progressPanel(selectedRow, "Running step progress") : null,
                 e("div", {className:"button-row"},
-                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/job/retry", {job_id:selectedJobId})}, "Run this job again"),
+                  e("button", {className:"secondary", disabled:!canResumeJob(selectedRow), onClick:()=>resumeJob(selectedJobId)}, selectedRow?.status === "working" ? "Resume stuck job" : "Resume this job"),
                   e("button", {className:"danger", disabled:!canStopJob(selectedRow), onClick:()=>stopJob(selectedJobId)}, selectedRow?.stop_requested === "true" ? "Stopping this job" : "Stop this job after current step"),
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"folder"})}, "Open subtitle folder"),
                   e("button", {className:"danger", disabled:!selectedJobId, onClick:deleteSelectedJob}, "Delete job from list")
@@ -1592,9 +1597,30 @@ class WebServiceState:
         return {"message": "Worker will stop after the next safe step"}
 
     def retry(self, job_id: str) -> dict[str, Any]:
+        return self.resume_job(job_id)
+
+    def resume_job(self, job_id: str) -> dict[str, Any]:
+        _job_dir, current = self.service.store.find_job(job_id)
+        if current.status == JOB_STATUS_WORKING:
+            self._stop_owned_worker_for_resume()
         manifest = self.service.resume(job_id)
         self.start_worker()
         return {"job_id": manifest.job_id}
+
+    def _stop_owned_worker_for_resume(self) -> None:
+        pid = self.service.store.active_worker_pid()
+        if not pid:
+            return
+        process = psutil.Process(pid)
+        cmdline = " ".join(process.cmdline()).lower()
+        if "local_subtitle_stack.cli" not in cmdline or "worker" not in cmdline:
+            raise RuntimeError(f"Refusing to stop unknown process {pid}.")
+        process.terminate()
+        _gone, alive = psutil.wait_procs([process], timeout=8)
+        for item in alive:
+            item.kill()
+        if self.worker_process and self.worker_process.pid == pid:
+            self.worker_process = None
 
     def stop_job(self, job_id: str) -> dict[str, Any]:
         manifest = self.service.stop_job(job_id)
@@ -2039,6 +2065,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(APP_STATE.stop_worker())
             elif self.path == "/api/job/retry":
                 self._send_json(APP_STATE.retry(str(payload["job_id"])))
+            elif self.path == "/api/job/resume":
+                self._send_json(APP_STATE.resume_job(str(payload["job_id"])))
             elif self.path == "/api/job/stop":
                 self._send_json(APP_STATE.stop_job(str(payload["job_id"])))
             elif self.path == "/api/job/delete":

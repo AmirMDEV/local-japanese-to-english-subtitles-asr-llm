@@ -1,7 +1,12 @@
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+from local_subtitle_stack.domain import JOB_STATUS_WORKING
 from local_subtitle_stack.web_ui import (
     HTML,
+    WebServiceState,
     close_other_web_ui_processes,
     count_completed_outputs,
     count_sources,
@@ -101,6 +106,10 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Start processing all jobs" in HTML
     assert "Clear finished jobs" in HTML
     assert "Clear all non-running jobs" in HTML
+    assert "Resume this job" in HTML
+    assert "Resume stuck job" in HTML
+    assert "/api/job/resume" in HTML
+    assert "canResumeJob" in HTML
     assert "Stop this job after current step" in HTML
     assert "/api/job/stop" in HTML
     assert "stop_requested" in HTML
@@ -145,6 +154,80 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "/api/job/delete" in HTML
     assert "selectNewJob" in HTML
     assert "setSettingsDraft(current => current || data.settings)" in HTML
+
+
+def test_resume_stuck_job_stops_owned_worker_before_requeue(monkeypatch) -> None:
+    class FakeStore:
+        def find_job(self, job_id: str):
+            return Path("working") / job_id, SimpleNamespace(status=JOB_STATUS_WORKING)
+
+        def active_worker_pid(self) -> int:
+            return 123
+
+    class FakeService:
+        store = FakeStore()
+
+        def __init__(self) -> None:
+            self.resumed: list[str] = []
+
+        def resume(self, job_id: str):
+            self.resumed.append(job_id)
+            return SimpleNamespace(job_id=job_id)
+
+    class FakeProcess:
+        pid = 123
+
+        def __init__(self) -> None:
+            self.terminated = False
+
+        def cmdline(self) -> list[str]:
+            return ["python", "-m", "local_subtitle_stack.cli", "worker"]
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            raise AssertionError("owned worker should terminate cleanly")
+
+    process = FakeProcess()
+    state = WebServiceState.__new__(WebServiceState)
+    state.service = FakeService()
+    state.worker_process = SimpleNamespace(pid=123)
+    state.start_worker = lambda: {"message": "Worker started", "pid": 456}
+    monkeypatch.setattr("local_subtitle_stack.web_ui.psutil.Process", lambda _pid: process)
+    monkeypatch.setattr("local_subtitle_stack.web_ui.psutil.wait_procs", lambda processes, timeout: (processes, []))
+
+    assert state.resume_job("job-1") == {"job_id": "job-1"}
+    assert process.terminated is True
+    assert state.service.resumed == ["job-1"]
+    assert state.worker_process is None
+
+
+def test_resume_stuck_job_refuses_unknown_worker_process(monkeypatch) -> None:
+    class FakeStore:
+        def find_job(self, job_id: str):
+            return Path("working") / job_id, SimpleNamespace(status=JOB_STATUS_WORKING)
+
+        def active_worker_pid(self) -> int:
+            return 123
+
+    class FakeService:
+        store = FakeStore()
+
+        def resume(self, _job_id: str):
+            raise AssertionError("unknown process must block resume")
+
+    class FakeProcess:
+        def cmdline(self) -> list[str]:
+            return ["python", "other-script.py"]
+
+    state = WebServiceState.__new__(WebServiceState)
+    state.service = FakeService()
+    state.worker_process = None
+    monkeypatch.setattr("local_subtitle_stack.web_ui.psutil.Process", lambda _pid: FakeProcess())
+
+    with pytest.raises(RuntimeError, match="Refusing to stop unknown process"):
+        state.resume_job("job-1")
 
 
 def test_web_ui_formats_model_sizes() -> None:

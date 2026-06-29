@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Added a web `Resume this job` / `Resume stuck job` control that requeues paused, failed, queued, or stuck working jobs and restarts processing.
 - Made web line edits auto-save into the preview and subtitle files, and added the context-applied English column to the preview grid.
 - Combined Health and Redo log into one collapsible web diagnostics panel with side-by-side desktop columns and a single mobile stack.
 - Fixed the web model defaults panel order so `Transcription and translation models` stays at the top of the review workflow before jobs and subtitle review panels.
