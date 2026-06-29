@@ -847,7 +847,7 @@ def test_update_subtitle_line_rejects_empty_text(
     manifest = service.enqueue(source, profile="default")
     service.run_until_empty()
 
-    with pytest.raises(QueueError, match="Direct English text cannot be empty."):
+    with pytest.raises(QueueError, match="Direct English translation text cannot be empty."):
         service.update_subtitle_line(
             manifest.job_id,
             cue_index=1,
@@ -1050,7 +1050,7 @@ def test_import_existing_english_only_rebuilds_without_asr(
     assert preview[0]["literal_english"] == "literal line 1"
     assert preview[0]["adapted_english"] == "adapted line 1"
     assert any(
-        "rewriting English subtitle lines into cleaner direct English" in prompt
+        "rewriting English subtitle lines into cleaner direct English translation" in prompt
         for _model, prompt in ollama.calls
     )
     assert any("for English dialogue" in prompt for _model, prompt in ollama.calls if '"literal_en"' in prompt)
@@ -1253,7 +1253,7 @@ def test_import_existing_requires_a_real_source_track(
         ],
     )
 
-    with pytest.raises(QueueError, match="Japanese or Direct English subtitle source track"):
+    with pytest.raises(QueueError, match="Japanese or Direct English translation subtitle source track"):
         service.import_existing(
             profile="default",
             video=video,

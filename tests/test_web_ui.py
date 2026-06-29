@@ -33,7 +33,8 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Check setup" in HTML
     assert "Start processing all jobs" in HTML
     assert "What to do now" in HTML
-    assert "Open direct English in Subtitle Edit" in HTML
+    assert "Open direct English translation in Subtitle Edit" in HTML
+    assert "Context-applied English" in HTML
     assert "Open review bundle in Subtitle Edit" in HTML
     assert "Add files and start processing" in HTML
     assert "Context is added to every English translation prompt" in HTML

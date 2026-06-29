@@ -17,8 +17,8 @@ It is made for long videos, batch jobs, and careful subtitle cleanup.
 - Safe default profile for smaller laptops
 - Japanese transcription
 - Experimental ReazonSpeech k2 Japanese ASR path
-- Direct English subtitle pass
-- Natural English subtitle pass
+- Direct English translation subtitle pass
+- Context-applied English subtitle pass
 - Whole-video helper notes
 - Time-range helper notes
 - Optional reference subtitle track
@@ -153,8 +153,8 @@ This folder is where the Japanese transcription model gets downloaded the first 
 The app starts with recommended defaults:
 
 - Japanese model: `kotoba-tech/kotoba-whisper-v2.2`
-- Direct English model: `qwen3:4b-q8_0`
-- Natural English model: `qwen3:4b-q8_0`
+- Direct English translation model: `qwen3:4b-q8_0`
+- Context-applied English model: `qwen3:4b-q8_0`
 
 If those are already in the boxes, you can keep them.
 
@@ -206,15 +206,15 @@ Use this when you already have `.srt` files and want to edit or reprocess them.
 3. Choose `Subtitle files only` if you just have subtitles.
 4. Add the subtitle files you have:
    - `Japanese`
-   - `Direct English`
-   - `Easy English`
+   - `Direct English translation`
+   - `Context-applied English`
    - `Reference`
 5. Press `Import`.
 
 You do not need every file. The most important source track is:
 
 - `Japanese`, or
-- `Direct English` if you do not have Japanese
+- `Direct English translation` if you do not have Japanese
 
 ## How Context Notes Work
 
@@ -295,8 +295,8 @@ If you are not sure what to use, start here:
 - Japanese listening engine: `Kotoba Japanese quality (recommended)`
 - Whisper speed profile: `Auto choose best fit`
 - Japanese model: `kotoba-tech/kotoba-whisper-v2.2`
-- Direct English model: `qwen3:4b-q8_0`
-- Natural English model: `qwen3:4b-q8_0`
+- Direct English translation model: `qwen3:4b-q8_0`
+- Context-applied English model: `qwen3:4b-q8_0`
 
 For videos around two hours or longer, use `Kotoba Japanese quality` when subtitle accuracy matters most. Use `Fast local Whisper` only when you need a quicker rough pass. The app writes partial Japanese and English subtitle files as it works and can resume from saved checkpoints if a long run stops.
 

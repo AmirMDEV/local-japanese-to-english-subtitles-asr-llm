@@ -246,7 +246,7 @@ def build_direct_english_rewrite_prompt(
         indent=2,
     )
     return (
-        "You are rewriting English subtitle lines into cleaner direct English.\n"
+        "You are rewriting English subtitle lines into cleaner direct English translation.\n"
         "Rules:\n"
         "- Preserve the intended meaning and the timing-aligned cue count.\n"
         "- Use context notes only to resolve ambiguity or improve wording fit.\n"

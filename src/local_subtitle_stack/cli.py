@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     attach_track = subparsers.add_parser(
         "attach-track",
-        help="Attach an existing subtitle file to a job as direct English, easy English, or reference.",
+        help="Attach an existing subtitle file to a job as direct English translation, context-applied English, or reference.",
     )
     attach_track.add_argument("job_id")
     attach_track.add_argument("--role", required=True, choices=["ja", "direct", "easy", "reference"])

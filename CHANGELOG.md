@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Renamed user-facing translation labels across web, desktop, CLI help, and docs: direct output is now `direct English translation`, and adapted output is now `context-applied English`.
 - Clarified the web context panel so overall context is described as English-translation prompt context, renamed batch label to series/project name, and made scene-note wording time-range specific.
 - Fixed web worker status after restarting the browser UI, auto-selecting newly loaded jobs, closing stale web UI instances on launch, and showing translation progress as soon as a subtitle group starts.
 - Split the selected-job controls so job actions and Subtitle Edit open actions are visibly separate, with every Subtitle Edit button labeled by destination.

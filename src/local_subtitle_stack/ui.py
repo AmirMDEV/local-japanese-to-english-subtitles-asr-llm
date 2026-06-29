@@ -41,14 +41,14 @@ STATUS_LABELS = {
 STAGE_LABELS = {
     "extract_audio": "Getting the audio ready",
     "transcribe": "Listening to the Japanese",
-    "translate_literal": "Making direct English",
-    "translate_adapted": "Making easy English",
+    "translate_literal": "Making direct English translation",
+    "translate_adapted": "Making context-applied English",
     "finalize": "Saving the subtitle files",
 }
 
 PREVIEW_BASE_COLUMNS: list[tuple[str, str]] = [
     ("japanese", "Japanese"),
-    ("literal_english", "Direct English"),
+    ("literal_english", "Direct English translation"),
 ]
 PREVIEW_REFERENCE_COLUMN = ("reference", "Reference")
 PREVIEW_COLUMN_WRAP_CHARS = {
@@ -215,8 +215,8 @@ class ImportExistingDialog(tk.Toplevel):
         self._build_picker_row(root, 1, "Video", "video", self.video_var, self._choose_video)
         self._build_picker_row(root, 2, "Primary subtitle", "primary", self.primary_var, self._choose_primary_subtitle)
         self._build_picker_row(root, 3, "Japanese", "ja", self.ja_var, lambda: self._choose_subtitle(self.ja_var))
-        self._build_picker_row(root, 4, "Direct English", "direct", self.direct_var, lambda: self._choose_subtitle(self.direct_var))
-        self._build_picker_row(root, 5, "Easy English", "easy", self.easy_var, lambda: self._choose_subtitle(self.easy_var))
+        self._build_picker_row(root, 4, "Direct English translation", "direct", self.direct_var, lambda: self._choose_subtitle(self.direct_var))
+        self._build_picker_row(root, 5, "Context-applied English", "easy", self.easy_var, lambda: self._choose_subtitle(self.easy_var))
         self._build_picker_row(root, 6, "Reference", "reference", self.reference_var, lambda: self._choose_subtitle(self.reference_var))
 
         detect_row = ttk.Frame(root)
@@ -347,8 +347,8 @@ class ImportExistingDialog(tk.Toplevel):
             label
             for label, value in (
                 ("Japanese", self.ja_var.get().strip()),
-                ("Direct English", self.direct_var.get().strip()),
-                ("Easy English", self.easy_var.get().strip()),
+                ("Direct English translation", self.direct_var.get().strip()),
+                ("Context-applied English", self.easy_var.get().strip()),
                 ("Reference", self.reference_var.get().strip()),
             )
             if value
@@ -529,7 +529,7 @@ class SubtitleStackApp(tk.Tk):
         profile_box.pack(side=tk.LEFT, padx=(8, 16))
         ttk.Checkbutton(
             action_bar,
-            text="Also make easy English now",
+            text="Also make context-applied English now",
             variable=self.include_adapted_english_var,
         ).pack(side=tk.LEFT, padx=(0, 16))
         ttk.Checkbutton(
@@ -590,7 +590,7 @@ class SubtitleStackApp(tk.Tk):
             text=(
                 "Speed mode helps your laptop stay comfortable. "
                 "Safe and steady is best when other apps are open. "
-                "Turn off easy English if you only want Japanese plus direct English. "
+                "Turn off context-applied English if you only want Japanese plus direct English translation. "
                 "Turn on faster English batches if you want speed more than extra caution."
             ),
             style="Hint.TLabel",
@@ -699,7 +699,7 @@ class SubtitleStackApp(tk.Tk):
             pady=(8, 0),
         )
 
-        ttk.Label(inner, text="Direct English model").grid(row=4, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Label(inner, text="Direct English translation model").grid(row=4, column=0, sticky=tk.W, pady=(8, 0))
         self.literal_model_box = ttk.Combobox(
             inner,
             textvariable=self.literal_model_var,
@@ -719,7 +719,7 @@ class SubtitleStackApp(tk.Tk):
             pady=(8, 0),
         )
 
-        ttk.Label(inner, text="Natural English model").grid(row=5, column=0, sticky=tk.W, pady=(8, 0))
+        ttk.Label(inner, text="Context-applied English model").grid(row=5, column=0, sticky=tk.W, pady=(8, 0))
         self.adapted_model_box = ttk.Combobox(
             inner,
             textvariable=self.adapted_model_var,
@@ -818,8 +818,8 @@ class SubtitleStackApp(tk.Tk):
             details = ollama.list_model_details()
         except Exception:
             details = {}
-        direct = self._ollama_model_line("Direct English", self.literal_model_var.get(), details)
-        natural = self._ollama_model_line("Natural English", self.adapted_model_var.get(), details)
+        direct = self._ollama_model_line("Direct English translation", self.literal_model_var.get(), details)
+        natural = self._ollama_model_line("Context-applied English", self.adapted_model_var.get(), details)
         return "\n".join(
             [
                 f"Ollama model storage: {root}",
@@ -852,7 +852,7 @@ class SubtitleStackApp(tk.Tk):
         self.literal_model_var.set(RECOMMENDED_TRANSLATION_MODEL)
         self.adapted_model_var.set(RECOMMENDED_TRANSLATION_MODEL)
         self.refresh_model_storage_summary()
-        self.status_var.set("Gemma e2b selected for direct and natural English")
+        self.status_var.set("Gemma e2b selected for direct English translation and context-applied English")
 
     def download_recommended_translation_model(self) -> None:
         self.status_var.set(f"Downloading {RECOMMENDED_TRANSLATION_MODEL}...")
@@ -921,13 +921,13 @@ class SubtitleStackApp(tk.Tk):
         file_buttons.pack(fill=tk.X, pady=(10, 0))
         self.open_ja_file_button = ttk.Button(file_buttons, text="Open Japanese file", command=lambda: self.open_selected_subtitle_file("ja"))
         self.open_ja_file_button.pack(side=tk.LEFT)
-        self.open_direct_file_button = ttk.Button(file_buttons, text="Open direct English", command=lambda: self.open_selected_subtitle_file("direct"))
+        self.open_direct_file_button = ttk.Button(file_buttons, text="Open direct English translation", command=lambda: self.open_selected_subtitle_file("direct"))
         self.open_direct_file_button.pack(side=tk.LEFT, padx=6)
-        self.open_easy_file_button = ttk.Button(file_buttons, text="Open easy English", command=lambda: self.open_selected_subtitle_file("easy"))
+        self.open_easy_file_button = ttk.Button(file_buttons, text="Open context-applied English", command=lambda: self.open_selected_subtitle_file("easy"))
         self.open_easy_file_button.pack(side=tk.LEFT, padx=6)
-        self.open_direct_partial_button = ttk.Button(file_buttons, text="Open partial direct", command=lambda: self.open_selected_subtitle_file("direct-partial"))
+        self.open_direct_partial_button = ttk.Button(file_buttons, text="Open partial direct English translation", command=lambda: self.open_selected_subtitle_file("direct-partial"))
         self.open_direct_partial_button.pack(side=tk.LEFT, padx=6)
-        self.open_easy_partial_button = ttk.Button(file_buttons, text="Open partial easy", command=lambda: self.open_selected_subtitle_file("easy-partial"))
+        self.open_easy_partial_button = ttk.Button(file_buttons, text="Open partial context-applied English", command=lambda: self.open_selected_subtitle_file("easy-partial"))
         self.open_easy_partial_button.pack(side=tk.LEFT, padx=6)
 
         preview_frame = ttk.LabelFrame(selected_frame, text="Subtitle lines", style="Section.TLabelframe")
@@ -998,8 +998,8 @@ class SubtitleStackApp(tk.Tk):
         )
         self.preview_tree.heading("time", text="Time")
         self.preview_tree.heading("japanese", text="Japanese")
-        self.preview_tree.heading("literal", text="Direct English")
-        self.preview_tree.heading("adapted", text="Easy English")
+        self.preview_tree.heading("literal", text="Direct English translation")
+        self.preview_tree.heading("adapted", text="Context-applied English")
         self.preview_tree.heading("reference", text="Reference")
         self.preview_tree.column("time", width=170, minwidth=150, anchor=tk.W, stretch=False)
         self.preview_tree.column("japanese", width=310, minwidth=240, anchor=tk.W)
@@ -1042,11 +1042,11 @@ class SubtitleStackApp(tk.Tk):
         self.line_editor_japanese_text = tk.Text(line_editor_inner, height=5, wrap="word")
         self.line_editor_japanese_text.grid(row=2, column=1, columnspan=3, sticky="nsew", padx=(8, 0))
 
-        ttk.Label(line_editor_inner, text="Direct English").grid(row=3, column=0, sticky=tk.NW, pady=(8, 0))
+        ttk.Label(line_editor_inner, text="Direct English translation").grid(row=3, column=0, sticky=tk.NW, pady=(8, 0))
         self.line_editor_literal_text = tk.Text(line_editor_inner, height=5, wrap="word")
         self.line_editor_literal_text.grid(row=3, column=1, columnspan=3, sticky="nsew", padx=(8, 0), pady=(8, 0))
 
-        ttk.Label(line_editor_inner, text="Easy English").grid(row=4, column=0, sticky=tk.NW, pady=(8, 0))
+        ttk.Label(line_editor_inner, text="Context-applied English").grid(row=4, column=0, sticky=tk.NW, pady=(8, 0))
         self.line_editor_adapted_text = tk.Text(line_editor_inner, height=5, wrap="word")
         self.line_editor_adapted_text.grid(row=4, column=1, columnspan=3, sticky="nsew", padx=(8, 0), pady=(8, 0))
 
@@ -1071,12 +1071,12 @@ class SubtitleStackApp(tk.Tk):
         self.save_line_button.pack(side=tk.LEFT, padx=6)
         ttk.Button(
             line_editor_buttons,
-            text="Import direct English into this job",
+            text="Import direct English translation into this job",
             command=lambda: self.attach_existing_track_to_selected_job("direct"),
         ).pack(side=tk.LEFT, padx=(18, 6))
         ttk.Button(
             line_editor_buttons,
-            text="Import easy English into this job",
+            text="Import context-applied English into this job",
             command=lambda: self.attach_existing_track_to_selected_job("easy"),
         ).pack(side=tk.LEFT, padx=6)
         ttk.Button(
@@ -1866,8 +1866,8 @@ class SubtitleStackApp(tk.Tk):
             f"{STATUS_LABELS.get(manifest.status, manifest.status)} | "
             f"{STAGE_LABELS.get(manifest.current_stage, manifest.current_stage)} | "
             f"Source: {'Video' if manifest.source_kind == 'video' else 'Subtitle-only'} | "
-            f"Translation source: {'Japanese' if manifest.translation_source_role == 'ja' else 'Imported Direct English'} | "
-            f"Easy English: {'on' if manifest.include_adapted_english else 'off'} | "
+            f"Translation source: {'Japanese' if manifest.translation_source_role == 'ja' else 'Imported Direct English translation'} | "
+            f"Context-applied English: {'on' if manifest.include_adapted_english else 'off'} | "
             f"Fast English: {'on' if manifest.prefer_fast_translation else 'off'}"
             + (" | Reference loaded" if manifest.imported_tracks.get('reference') else "")
         )
@@ -1936,7 +1936,7 @@ class SubtitleStackApp(tk.Tk):
         selected_item_ids: list[str] = []
         self.preview_visible_columns = list(PREVIEW_BASE_COLUMNS)
         if any(bool(row.get("has_adapted_english")) for row in rows):
-            self.preview_visible_columns.append(("adapted_english", "Easy English"))
+            self.preview_visible_columns.append(("adapted_english", "Context-applied English"))
         if any(bool(row.get("has_reference")) for row in rows):
             self.preview_visible_columns.append(PREVIEW_REFERENCE_COLUMN)
         for row in rows:
@@ -2389,8 +2389,8 @@ class SubtitleStackApp(tk.Tk):
                 f"{STATUS_LABELS.get(selected_row['status'], selected_row['status'])} | "
                 f"{STAGE_LABELS.get(selected_row['stage'], selected_row['stage'])} | "
                 f"Source: {'Video' if selected_row.get('source_kind') == 'video' else 'Subtitle-only'} | "
-                f"Translation source: {'Japanese' if selected_row.get('translation_source_role') == 'ja' else 'Imported Direct English'} | "
-                f"Easy English: {'on' if selected_row.get('include_adapted_english') == 'true' else 'off'} | "
+                f"Translation source: {'Japanese' if selected_row.get('translation_source_role') == 'ja' else 'Imported Direct English translation'} | "
+                f"Context-applied English: {'on' if selected_row.get('include_adapted_english') == 'true' else 'off'} | "
                 f"Fast English: {'on' if selected_row.get('prefer_fast_translation') == 'true' else 'off'}"
                 + (" | Reference loaded" if selected_row.get("has_reference") == "true" else "")
             )

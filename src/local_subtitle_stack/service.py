@@ -91,8 +91,8 @@ class PauseRequested(RuntimeError):
 STAGE_DISPLAY_LABELS = {
     STAGE_EXTRACT: "Getting the audio ready",
     STAGE_TRANSCRIBE: "Listening to the Japanese",
-    STAGE_LITERAL: "Making direct English",
-    STAGE_ADAPTED: "Making easy English",
+    STAGE_LITERAL: "Making direct English translation",
+    STAGE_ADAPTED: "Making context-applied English",
     STAGE_FINALIZE: "Saving the subtitle files",
 }
 
@@ -298,7 +298,7 @@ class WorkerService:
         if not tracks:
             raise QueueError("No subtitle files were provided or detected for import.")
         if "ja" not in tracks and "direct" not in tracks:
-            raise QueueError("Import needs a Japanese or Direct English subtitle source track.")
+            raise QueueError("Import needs a Japanese or Direct English translation subtitle source track.")
 
         for role, path in list(tracks.items()):
             if path.suffix.lower() != ".srt":
@@ -461,8 +461,8 @@ class WorkerService:
         job_dir, manifest = self.store.find_job(job_id)
         updates = (
             ("ja_cues", "ja_srt", japanese_text, "Japanese", True),
-            ("literal_cues", "literal_srt", literal_english_text, "Direct English", True),
-            ("adapted_cues", "adapted_srt", adapted_english_text, "Easy English", True),
+            ("literal_cues", "literal_srt", literal_english_text, "Direct English translation", True),
+            ("adapted_cues", "adapted_srt", adapted_english_text, "Context-applied English", True),
             ("reference_cues", "reference_srt", reference_text, "Reference subtitle", False),
         )
         updated_any = False
@@ -727,8 +727,8 @@ class WorkerService:
             add("ok", "Ollama API", f"Connected. {len(models)} model(s) found.")
 
         for name, model in (
-            ("Direct English model", self.config.models.literal_translation),
-            ("Easy English model", self.config.models.adapted_translation),
+            ("Direct English translation model", self.config.models.literal_translation),
+            ("Context-applied English model", self.config.models.adapted_translation),
         ):
             if not models:
                 add("warning", name, f"Could not verify {model} because Ollama was unavailable.")
@@ -1815,7 +1815,7 @@ class WorkerService:
             self._append_event(
                 manifest,
                 "info",
-                "Skipped easy English because this job is set to direct English only.",
+                "Skipped context-applied English because this job is set to direct English translation only.",
                 stage=STAGE_ADAPTED,
             )
             self._clear_stage_progress(manifest)
@@ -2222,8 +2222,8 @@ class WorkerService:
     def _role_display_name(self, role: str) -> str:
         return {
             "ja": "Japanese",
-            "direct": "Direct English",
-            "easy": "Easy English",
+            "direct": "Direct English translation",
+            "easy": "Context-applied English",
             "reference": "Reference",
         }.get(role, role)
 
@@ -2347,7 +2347,7 @@ class WorkerService:
                 job_dir,
                 manifest,
                 "literal_cues",
-                label="Direct English",
+                label="Direct English translation",
             )
             merged_literal = self._merge_cue_updates(
                 existing_literal,
@@ -2380,7 +2380,7 @@ class WorkerService:
                     job_dir,
                     manifest,
                     "adapted_cues",
-                    label="Easy English",
+                    label="Context-applied English",
                 )
                 merged_adapted = self._merge_cue_updates(
                     existing_adapted,

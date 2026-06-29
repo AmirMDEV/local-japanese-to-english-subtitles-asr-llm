@@ -337,13 +337,13 @@ HTML = r"""<!doctype html>
       if (parts.length === 2) return parts[0] * 60 + parts[1];
       return Number(value) || 0;
     };
-    const stageLabel = stage => ({
-      extract: "Prepare audio",
-      transcribe: "Transcribe source language",
-      literal: "Translate to direct English",
-      adapted: "Improve English wording",
-      finalize: "Save subtitle files"
-    })[stage] || (stage || "Not started");
+      const stageLabel = stage => ({
+        extract: "Prepare audio",
+        transcribe: "Transcribe source language",
+        literal: "Make direct English translation",
+        adapted: "Make context-applied English",
+        finalize: "Save subtitle files"
+      })[stage] || (stage || "Not started");
     const jobStepText = row => {
       if (!row) return "";
       if (row.status === "completed" && row.stage === "finalize") return "Saved subtitle files";
@@ -499,10 +499,10 @@ HTML = r"""<!doctype html>
       const outputButtons = [
         ["review", "Open review bundle in Subtitle Edit"],
         ["ja", "Open Japanese in Subtitle Edit"],
-        ["direct", "Open direct English in Subtitle Edit"],
-        ["easy", "Open natural English in Subtitle Edit"],
-        ["direct-partial", "Open direct draft in Subtitle Edit"],
-        ["easy-partial", "Open natural draft in Subtitle Edit"]
+        ["direct", "Open direct English translation in Subtitle Edit"],
+        ["easy", "Open context-applied English in Subtitle Edit"],
+        ["direct-partial", "Open direct English draft in Subtitle Edit"],
+        ["easy-partial", "Open context-applied draft in Subtitle Edit"]
       ];
       const workflowSteps = [
         ["1", "Choose input", "Pick videos, folder, or existing subtitles."],
@@ -553,7 +553,7 @@ HTML = r"""<!doctype html>
                   ),
                   e("label", {className:"check-label control-span-6"},
                     e("input", {type:"checkbox", checked:includeAdapted, onChange:ev=>setIncludeAdapted(ev.target.checked)}),
-                    "Easy English"
+                    "Context-applied English"
                   ),
                   e("label", {className:"check-label control-span-6"},
                     e("input", {type:"checkbox", checked:preferFast, onChange:ev=>setPreferFast(ev.target.checked)}),
@@ -614,7 +614,7 @@ HTML = r"""<!doctype html>
                 e("div", {className:"field"},
                   e("label", null, "Dropped subtitle type"),
                   e("select", {value:dropRole, onChange:ev=>setDropRole(ev.target.value)},
-                    [["direct","Direct English"],["ja","Japanese"],["easy","Natural English"],["reference","Reference"]].map(([value,label]) => e("option", {key:value, value}, label))
+                    [["direct","Direct English translation"],["ja","Japanese"],["easy","Context-applied English"],["reference","Reference"]].map(([value,label]) => e("option", {key:value, value}, label))
                   )
                 ),
                 e("div", {className:"preview-list"}, job && job.preview && job.preview.length ? job.preview.map(row => e("button", {key:row.cue_index, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""} ${selectedCueIndexes.includes(row.cue_index)?"selected":""}`, onClick:ev=>toggleCue(row, ev)},
@@ -622,12 +622,12 @@ HTML = r"""<!doctype html>
                   e("span", null, row.japanese || row.literal_english || row.adapted_english || row.reference || "")
                 )) : e("div", {className:"drop-zone", onDragOver:ev=>ev.preventDefault(), onDrop:dropSubtitle},
                   e("strong", null, "Drop an .srt file here to edit existing subtitles"),
-                  e("span", null, selectedJobId ? "Dropped file attaches to the selected job." : "Dropped direct/Japanese subtitles create a new editable job.")
+                  e("span", null, selectedJobId ? "Dropped file attaches to the selected job." : "Dropped direct English translation/Japanese subtitles create a new editable job.")
                 )),
                 line ? e("div", {className:"stack"},
                   e("textarea", {value:line.japanese || "", onChange:ev=>setLine({...line, japanese:ev.target.value}), placeholder:"Japanese"}),
-                  e("textarea", {value:line.literal_english || "", onChange:ev=>setLine({...line, literal_english:ev.target.value}), placeholder:"Direct English"}),
-                  e("textarea", {value:line.adapted_english || "", onChange:ev=>setLine({...line, adapted_english:ev.target.value}), placeholder:"Easy English"}),
+                  e("textarea", {value:line.literal_english || "", onChange:ev=>setLine({...line, literal_english:ev.target.value}), placeholder:"Direct English translation"}),
+                  e("textarea", {value:line.adapted_english || "", onChange:ev=>setLine({...line, adapted_english:ev.target.value}), placeholder:"Context-applied English"}),
                   e("textarea", {value:line.reference || "", onChange:ev=>setLine({...line, reference:ev.target.value}), placeholder:"Reference"}),
                   e("button", {onClick:saveLine}, "Save line")
                 ) : null
@@ -689,13 +689,13 @@ HTML = r"""<!doctype html>
                   )
                 ) : null,
                 settingsDraft ? e("div", {className:"field"},
-                  e("label", null, "Direct English model"),
+                  e("label", null, "Direct English translation model"),
                   e("select", {value:settingsDraft.models?.literal_translation || "", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, literal_translation:ev.target.value}})},
                     (currentSettings.translation_models || []).map(item => e("option", {key:item, value:item}, item || "Default"))
                   )
                 ) : null,
                 settingsDraft ? e("div", {className:"field"},
-                  e("label", null, "Natural English model"),
+                  e("label", null, "Context-applied English model"),
                   e("select", {value:settingsDraft.models?.adapted_translation || "", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, adapted_translation:ev.target.value}})},
                     (currentSettings.translation_models || []).map(item => e("option", {key:item, value:item}, item || "Default"))
                   )
@@ -730,11 +730,11 @@ HTML = r"""<!doctype html>
                   e("button", {className:"secondary", onClick:()=>chooseSubtitle("japanese")}, "Pick Japanese")
                 ),
                 e("div", {className:"guided-grid"},
-                  e("input", {value:importDraft.direct || "", readOnly:true, placeholder:"Direct English SRT"}),
+                  e("input", {value:importDraft.direct || "", readOnly:true, placeholder:"Direct English translation SRT"}),
                   e("button", {className:"secondary", onClick:()=>chooseSubtitle("direct")}, "Pick direct")
                 ),
                 e("div", {className:"guided-grid"},
-                  e("input", {value:importDraft.easy || "", readOnly:true, placeholder:"Natural English SRT"}),
+                  e("input", {value:importDraft.easy || "", readOnly:true, placeholder:"Context-applied English SRT"}),
                   e("button", {className:"secondary", onClick:()=>chooseSubtitle("easy")}, "Pick natural")
                 ),
                 e("div", {className:"guided-grid"},
@@ -743,8 +743,8 @@ HTML = r"""<!doctype html>
                 ),
                 e("div", {className:"button-row"}, [
                   ["ja", "japanese", "Attach Japanese"],
-                  ["direct", "direct", "Attach direct English"],
-                  ["easy", "easy", "Attach natural English"],
+                  ["direct", "direct", "Attach direct English translation"],
+                  ["easy", "easy", "Attach context-applied English"],
                   ["reference", "reference", "Attach reference"]
                 ].map(([role, key, label]) => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[key], onClick:()=>post("/api/job/attach", {job_id:selectedJobId, role, path:importDraft[key]})}, label)))
               )
@@ -1215,7 +1215,7 @@ class WebServiceState:
             manifest = self.service.attach_existing_subtitle(job_id, role=role, subtitle_path=target)
             return {"mode": "attached", "job_id": manifest.job_id, "path": str(target)}
         if role not in {"ja", "direct"}:
-            raise QueueError("Select an existing job before dropping natural English or reference subtitles.")
+            raise QueueError("Select an existing job before dropping context-applied English or reference subtitles.")
         kwargs = {"primary_subtitle": target, "profile": str(payload.get("profile") or self.service.config.default_profile)}
         if role == "ja":
             kwargs["japanese"] = target
@@ -1303,8 +1303,8 @@ def model_storage_snapshot() -> dict[str, Any]:
         "storage": ollama.model_storage_root(),
         "hf_cache": config.cache_paths.hf_hub_cache,
         "selected": [
-            selected("Direct English", config.models.literal_translation),
-            selected("Natural English", config.models.adapted_translation),
+            selected("Direct English translation", config.models.literal_translation),
+            selected("Context-applied English", config.models.adapted_translation),
         ],
     }
 
