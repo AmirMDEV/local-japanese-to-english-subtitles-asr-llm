@@ -40,6 +40,10 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Blob files" in HTML
     assert "Preview and line editor" in HTML
     assert "Transcription and translation models" in HTML
+    assert "model-settings-panel" in HTML
+    assert "select option" in HTML
+    assert "Downloaded Hugging Face Japanese ASR/listening model files are stored and reused here" in HTML
+    assert "does not copy Gemma/Ollama English models" in HTML
     assert "Load existing subtitles" in HTML
     assert "Check setup" in HTML
     assert "Start processing all jobs" in HTML

@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Moved model configuration to the top of the web workflow column, fixed dark dropdown option contrast, and clarified that the Japanese model cache stores Hugging Face ASR/listening files while Gemma/Ollama English models stay in Ollama storage.
 - Expanded the web Models panel so Direct English translation and Context-applied English show their exact Ollama storage root, manifest file, and blob file paths.
 - Split web translation context into overall video context and time-range context, with Shift-click range selection, automatic start/end time fill, editable context range cards, and selected-range retranslation wording.
 - Renamed user-facing translation labels across web, desktop, CLI help, and docs: direct output is now `direct English translation`, and adapted output is now `context-applied English`.

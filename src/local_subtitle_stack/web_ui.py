@@ -86,6 +86,15 @@ HTML = r"""<!doctype html>
       padding: 9px 10px;
       min-width: 0;
     }
+    select { color-scheme: dark; }
+    select option {
+      background: #20272d;
+      color: #f7f9fb;
+    }
+    select option:checked {
+      background: #31445a;
+      color: #ffffff;
+    }
     input::placeholder { color: #8797a4; }
     main {
       width: min(1480px, 100%);
@@ -121,6 +130,7 @@ HTML = r"""<!doctype html>
       min-width: 0;
       overflow: clip;
     }
+    .model-settings-panel { order: -1; }
     .panel-head {
       display: flex;
       justify-content: space-between;
@@ -749,10 +759,10 @@ HTML = r"""<!doctype html>
                 e("div", {className:"model-row"}, e("span", null, "Japanese cache"), e("span", {className:"path"}, models.hf_cache || "Default Hugging Face cache"), e("span", null, ""))
               )
             ),
-            e("section", {className:"panel"},
+            e("section", {className:"panel model-settings-panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Transcription and translation models"), e("span", null, "App-wide")),
               e("div", {className:"panel-body stack"},
-                e("p", {className:"section-note"}, "Choose Japanese listening model, English translation model, and cache folder. Pickers fill paths for you."),
+                e("p", {className:"section-note"}, "Choose the Japanese listening model and English translation models before adding jobs. These settings apply to every new job."),
                 settingsDraft ? e("div", {className:"field"},
                   e("label", null, "Japanese listening model"),
                   e("select", {value:settingsDraft.models?.asr || "", onChange:ev => {
@@ -792,7 +802,8 @@ HTML = r"""<!doctype html>
                     e("label", null, "Japanese model cache"),
                     e("select", {value:settingsDraft.cache_paths?.hf_hub_cache || "", onChange:ev=>setSettingsDraft({...settingsDraft, cache_paths:{...settingsDraft.cache_paths, hf_hub_cache:ev.target.value}})},
                       (currentSettings.cache_options || [""]).map(item => e("option", {key:item || "default", value:item}, item || "Default Hugging Face cache"))
-                    )
+                    ),
+                    e("p", {className:"tiny"}, "Downloaded Hugging Face Japanese ASR/listening model files are stored and reused here. This does not copy Gemma/Ollama English models; those stay in the Ollama storage shown in Models.")
                   ),
                   e("button", {className:"secondary", onClick:chooseCacheFolder}, "Pick cache folder")
                 ) : null,
