@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -1529,10 +1528,7 @@ class WebServiceState:
         return {"job_id": manifest.job_id}
 
     def delete_job(self, job_id: str) -> dict[str, Any]:
-        job_dir, manifest = self.service.store.find_job(job_id)
-        if manifest.status == "working":
-            raise QueueError("Stop processing before deleting a running job.")
-        shutil.rmtree(job_dir)
+        self.service.store.remove_from_list(job_id)
         return {"deleted": job_id}
 
     def save_notes(self, payload: dict[str, Any]) -> dict[str, Any]:

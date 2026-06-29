@@ -111,6 +111,28 @@ def test_resume_completed_job_raises(tmp_path: Path) -> None:
         store.resume_job(manifest.job_id)
 
 
+def test_remove_from_list_hides_job_without_deleting_files(tmp_path: Path) -> None:
+    config = build_config(tmp_path)
+    store = QueueStore(config)
+    source = tmp_path / "locked-file.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = store.enqueue(source, profile="default")
+    job_dir, manifest = store.claim_next_job()
+    assert job_dir is not None
+    done_dir, manifest = store.mark_completed(job_dir, manifest)
+    partial = done_dir / "literal_cues.partial.json"
+    partial.write_text("still open elsewhere", encoding="utf-8")
+
+    removed = store.remove_from_list(manifest.job_id)
+
+    assert removed.job_id == manifest.job_id
+    assert done_dir.exists()
+    assert partial.exists()
+    assert not store.list_jobs()
+    with pytest.raises(QueueError, match="Unknown job id"):
+        store.find_job(manifest.job_id)
+
+
 def test_active_worker_pid_reuses_lock_check(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     config = build_config(tmp_path)
     store = QueueStore(config)

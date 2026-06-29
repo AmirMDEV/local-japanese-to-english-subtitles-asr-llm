@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Fixed web job deletion on Windows by hiding jobs from the queue list instead of deleting locked job folders or partial files.
 - Moved `Overall video context` above the subtitle preview/editor in the web review column so context is set before reviewing or rerunning lines.
 - Added visible feedback for `Restore before` in the web second-pass changes list, showing restoring, restored, or failed states per line.
 - Clarified the web line editor so Direct English translation is read-only reference text, while Context-applied English is the editable final subtitle and auto-saves after typing.

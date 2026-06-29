@@ -29,6 +29,8 @@ class QueueError(RuntimeError):
 
 
 class QueueStore:
+    REMOVED_MARKER = ".removed-from-list"
+
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         ensure_queue_directories(config)
@@ -96,7 +98,7 @@ class QueueStore:
 
     def _job_dirs(self, parent: Path) -> list[Path]:
         return sorted(
-            [path for path in parent.iterdir() if path.is_dir()],
+            [path for path in parent.iterdir() if path.is_dir() and not (path / self.REMOVED_MARKER).exists()],
             key=lambda item: item.name,
         )
 
@@ -224,6 +226,13 @@ class QueueStore:
             if manifest.job_id == job_id:
                 return job_dir, manifest
         raise QueueError(f"Unknown job id: {job_id}")
+
+    def remove_from_list(self, job_id: str) -> JobManifest:
+        job_dir, manifest = self.find_job(job_id)
+        if manifest.status == JOB_STATUS_WORKING:
+            raise QueueError("Stop processing before deleting a running job.")
+        (job_dir / self.REMOVED_MARKER).write_text(now_iso(), encoding="utf-8")
+        return manifest
 
     def claim_next_job(self) -> tuple[Path, JobManifest] | None:
         for job_dir in self._job_dirs(self.working_dir):
