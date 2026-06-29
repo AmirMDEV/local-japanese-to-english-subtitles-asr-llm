@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Split the selected-job controls so job actions and Subtitle Edit open actions are visibly separate, with every Subtitle Edit button labeled by destination.
 - Fixed the web Jobs panel so completed jobs say saved, stale jobs load without `Failed to fetch`, and jobs can be deleted from the queue list without deleting exported subtitle files.
 - Added drag-and-drop `.srt` import in the web preview editor so existing subtitles can be uploaded into a new job or attached to the selected job.
 - Added a plain-language workflow guide and clearer review buttons so the web UI explains what to do at each stage.

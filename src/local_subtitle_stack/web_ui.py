@@ -256,6 +256,13 @@ HTML = r"""<!doctype html>
       border-radius: 8px;
       padding: 10px 12px;
     }
+    .action-section {
+      display: grid;
+      gap: 10px;
+      padding-top: 12px;
+      border-top: 1px solid var(--line);
+    }
+    .action-section strong { font-size: 14px; }
     progress { width: 100%; height: 18px; accent-color: var(--accent); margin-top: 14px; }
     pre {
       white-space: pre-wrap;
@@ -482,11 +489,12 @@ HTML = r"""<!doctype html>
       const selectedRow = jobs.find(row => row.job_id === selectedJobId);
       const modelText = selectedRow?.current_model || "No model active now";
       const outputButtons = [
-        ["ja", "Open Japanese subtitles"],
-        ["direct", "Open direct English subtitles"],
-        ["easy", "Open natural English subtitles"],
-        ["direct-partial", "Open direct draft"],
-        ["easy-partial", "Open natural draft"]
+        ["review", "Open review bundle in Subtitle Edit"],
+        ["ja", "Open Japanese in Subtitle Edit"],
+        ["direct", "Open direct English in Subtitle Edit"],
+        ["easy", "Open natural English in Subtitle Edit"],
+        ["direct-partial", "Open direct draft in Subtitle Edit"],
+        ["easy-partial", "Open natural draft in Subtitle Edit"]
       ];
       const workflowSteps = [
         ["1", "Choose input", "Pick videos, folder, or existing subtitles."],
@@ -579,12 +587,15 @@ HTML = r"""<!doctype html>
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/job/retry", {job_id:selectedJobId})}, "Run this job again"),
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"folder"})}, "Open subtitle folder"),
-                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"review"})}, "Open in Subtitle Edit"),
                   e("button", {className:"danger", disabled:!selectedJobId, onClick:deleteSelectedJob}, "Delete job from list")
                 ),
-                e("p", {className:"section-note"}, "Open saved subtitle files for review. Delete removes this job card only; exported subtitle files stay in the output folder."),
-                e("div", {className:"button-row"},
-                  outputButtons.map(([kind, label]) => e("button", {key:kind, className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:kind})}, label))
+                e("p", {className:"section-note"}, "These controls manage the job card. Delete removes this job card only; exported subtitle files stay in the output folder."),
+                e("div", {className:"action-section"},
+                  e("strong", null, "Open in Subtitle Edit"),
+                  e("p", {className:"section-note"}, "Use these when you want Subtitle Edit to open saved subtitles or drafts."),
+                  e("div", {className:"button-row"},
+                    outputButtons.map(([kind, label]) => e("button", {key:kind, className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:kind})}, label))
+                  )
                 )
               )
             ),
