@@ -122,6 +122,13 @@ HTML = r"""<!doctype html>
       align-items: start;
     }
     .stack { display: grid; gap: 14px; min-width: 0; }
+    .review-stack > .panel { order: 10; }
+    .review-stack > .jobs-panel { order: 0; }
+    .review-stack > .selected-job-panel { order: 1; }
+    .review-stack > .context-panel { order: 2; }
+    .review-stack > .preview-editor-panel { order: 3; }
+    .review-stack > .second-pass-panel { order: 4; }
+    .review-stack > .time-range-panel { order: 5; }
     .panel {
       background: color-mix(in srgb, var(--surface) 86%, transparent);
       border: 1px solid var(--line);
@@ -892,7 +899,7 @@ HTML = r"""<!doctype html>
           ].map(([role, key, label]) => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[key], onClick:()=>attachSubtitle(role, key)}, label)))
         )
       );
-      const jobsPanel = e("section", {className:"panel"},
+      const jobsPanel = e("section", {className:"panel jobs-panel"},
         e("div", {className:"panel-head"}, e("strong", null, "Jobs"), e("span", null, status.worker_running ? "Running" : (status.pause_requested ? "Stopping" : "Idle"))),
         e("div", {className:"panel-body stack"},
           e("div", {className:"job-list"},
@@ -972,9 +979,9 @@ HTML = r"""<!doctype html>
             subtitleImportPanel,
             error ? e("section", {className:"panel error"}, e("div", {className:"panel-head"}, e("strong", null, "Error")), e("div", {className:"panel-body"}, e("p", null, error))) : null
           ),
-          e("div", {className:"stack"},
+          e("div", {className:"stack review-stack"},
             jobsPanel,
-            e("section", {className:"panel"},
+            e("section", {className:"panel selected-job-panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Selected job"), e("span", null, selectedRow ? selectedRow.status : "None")),
               e("div", {className:"panel-body stack"},
                 e("div", {className:"review-box"}, e("strong", null, "What to do now"), e("p", null, reviewHint(selectedRow))),
@@ -999,7 +1006,7 @@ HTML = r"""<!doctype html>
                 )
               )
             ),
-            e("section", {className:"panel"},
+            e("section", {className:"panel preview-editor-panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Preview and line editor"), e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob)}, "Reload")),
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "Click a line to edit it. Ctrl-click adds separate lines. Shift-click selects a continuous range and fills the time-range context below."),
@@ -1059,7 +1066,7 @@ HTML = r"""<!doctype html>
                 ) : null
               )
             ),
-            e("section", {className:"panel"},
+            e("section", {className:"panel context-panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Overall video context"), e("span", null, status.rebuild_running ? "Running" : "Idle")),
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "This text is added to every English translation prompt after the Japanese audio has been transcribed. Use it for names, relationships, tone, slang, and story so far."),
@@ -1072,7 +1079,7 @@ HTML = r"""<!doctype html>
                 )
               )
             ),
-            e("section", {className:"panel"},
+            e("section", {className:"panel second-pass-panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Second-pass changes"), e("span", null, status.rebuild_running ? "Running" : `${(job?.coherence_review || []).length} changes`)),
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "After second-pass coherence review, changed context-applied English lines appear here. Click a change to select that subtitle line. Restore before puts that one line back."),
@@ -1088,7 +1095,7 @@ HTML = r"""<!doctype html>
                 ))) : e("div", {className:"empty"}, "No second-pass changes yet.")
               )
             ),
-            e("section", {className:"panel"},
+            e("section", {className:"panel time-range-panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Time-range context"), e("span", null, selectedCueIndexes.length ? `${selectedCueIndexes.length} selected` : "Select subtitle lines")),
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "Select subtitle lines in the preview. Start and end times fill automatically. Add as many context ranges as needed, then retranslate the selected time range or save them for the full job."),

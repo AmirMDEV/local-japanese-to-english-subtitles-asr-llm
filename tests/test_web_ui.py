@@ -39,6 +39,9 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Stored on" in HTML
     assert "Blob files" in HTML
     assert "Preview and line editor" in HTML
+    assert "review-stack" in HTML
+    assert "context-panel" in HTML
+    assert "preview-editor-panel" in HTML
     assert "Time display" in HTML
     assert "Seconds, e.g. 62.5s" in HTML
     assert "Hours:minutes:seconds, e.g. 00:01:02.500" in HTML
