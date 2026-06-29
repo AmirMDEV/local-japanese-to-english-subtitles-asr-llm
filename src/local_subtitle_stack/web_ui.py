@@ -257,6 +257,17 @@ HTML = r"""<!doctype html>
     .model-locations span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .job-list, .preview-list, .note-list { display: grid; gap: 8px; max-height: min(42vh, 480px); overflow: auto; }
     .preview-list { align-content: start; align-items: stretch; max-height: min(58vh, 680px); }
+    .job-card {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 38px;
+      gap: 8px;
+      align-items: start;
+      background: rgba(0,0,0,.14);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 6px;
+      min-width: 0;
+    }
+    .job-card.active { border-color: var(--accent); }
     .job-row, .preview-row, .note-row {
       width: 100%;
       text-align: left;
@@ -268,7 +279,30 @@ HTML = r"""<!doctype html>
       border-radius: 6px;
       white-space: normal;
     }
-    .job-row.active, .preview-row.active { border-color: var(--accent); }
+    .job-card .job-row {
+      min-height: auto;
+      padding: 10px 12px;
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+      box-shadow: none;
+    }
+    .job-delete {
+      width: 32px;
+      min-width: 32px;
+      min-height: 32px;
+      height: 32px;
+      margin: 8px 8px 0 0;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      background: transparent;
+      color: var(--muted);
+      border-color: var(--line);
+      line-height: 1;
+    }
+    .job-delete:hover:not(:disabled) { color: #ffffff; border-color: var(--danger); background: rgba(255,209,209,.12); }
+    .preview-row.active { border-color: var(--accent); }
     .preview-row.selected { background: rgba(255,216,77,.12); border-color: rgba(255,216,77,.55); }
     .preview-header, .preview-row {
       grid-template-columns: 112px minmax(0, 1fr) minmax(0, 1.08fr);
@@ -587,17 +621,20 @@ HTML = r"""<!doctype html>
         setNoteStart(""); setNoteEnd(""); setNoteText("");
       };
       const saveNotes = () => selectedJobId && post("/api/job/notes", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
-      const deleteSelectedJob = () => {
-        if (!selectedJobId) return;
+      const deleteJob = jobId => {
+        if (!jobId) return;
         if (!confirm("Delete this job from the queue list? Saved subtitle files in the output folder stay on disk.")) return;
-        post("/api/job/delete", {job_id:selectedJobId}, () => {
-          setSelectedJobId("");
-          setJob(null);
-          setLine(null);
-          setSelectedCueIndexes([]);
+        post("/api/job/delete", {job_id:jobId}, () => {
+          if (jobId === selectedJobId) {
+            setSelectedJobId("");
+            setJob(null);
+            setLine(null);
+            setSelectedCueIndexes([]);
+          }
           refresh();
         });
       };
+      const deleteSelectedJob = () => deleteJob(selectedJobId);
       const clearJobs = async mode => {
         const removable = jobs.filter(row => mode === "finished" ? ["completed", "failed", "paused"].includes(row.status) : row.status !== "working");
         if (!removable.length) return;
@@ -772,10 +809,13 @@ HTML = r"""<!doctype html>
         e("div", {className:"panel-head"}, e("strong", null, "Jobs"), e("span", null, status.worker_running ? "Running" : (status.pause_requested ? "Stopping" : "Idle"))),
         e("div", {className:"panel-body stack"},
           e("div", {className:"job-list"},
-            jobs.length ? jobs.map(row => e("button", {key:row.job_id, className:`job-row ${row.job_id===selectedJobId?"active":""}`, onClick:()=>setSelectedJobId(row.job_id)},
-              e("strong", null, row.source),
-              e("span", {className:"tiny"}, `${row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
-              e("span", null, jobStepText(row))
+            jobs.length ? jobs.map(row => e("div", {key:row.job_id, className:`job-card ${row.job_id===selectedJobId?"active":""}`},
+              e("button", {className:"job-row", onClick:()=>setSelectedJobId(row.job_id)},
+                e("strong", null, row.source),
+                e("span", {className:"tiny"}, `${row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
+                e("span", null, jobStepText(row))
+              ),
+              e("button", {className:"job-delete", title:"Remove job from list", "aria-label":`Remove ${row.source} from job list`, disabled:row.status === "working", onClick:()=>deleteJob(row.job_id)}, "X")
             )) : e("div", {className:"empty"}, "No jobs yet.")
           ),
           e("div", {className:"button-row"},

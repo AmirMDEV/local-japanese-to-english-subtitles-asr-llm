@@ -77,6 +77,8 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Start processing all jobs" in HTML
     assert "Clear finished jobs" in HTML
     assert "Clear all non-running jobs" in HTML
+    assert "job-delete" in HTML
+    assert "Remove job from list" in HTML
     assert "What to do now" in HTML
     assert "Open direct English translation in Subtitle Edit" in HTML
     assert "Context-applied English" in HTML
