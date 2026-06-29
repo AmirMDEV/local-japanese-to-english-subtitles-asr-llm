@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Made web line edits auto-save into the preview and subtitle files, and added the context-applied English column to the preview grid.
 - Combined Health and Redo log into one collapsible web diagnostics panel with side-by-side desktop columns and a single mobile stack.
 - Fixed the web model defaults panel order so `Transcription and translation models` stays at the top of the review workflow before jobs and subtitle review panels.
 - Added per-job stop controls in the web UI so a queued job pauses before starting and a running job stops after the next safe checkpoint without pausing the whole queue.

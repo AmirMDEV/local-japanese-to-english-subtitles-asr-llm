@@ -58,12 +58,15 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "user-select: none" in HTML
     assert "Japanese subtitles" in HTML
     assert "Direct English translation" in HTML
+    assert "Context-applied English" in HTML
+    assert "No context-applied English loaded" in HTML
     assert "No direct English loaded" in HTML
     assert "Japanese source subtitles" in HTML
     assert "What the listening model heard" in HTML
     assert "Read-only model output" in HTML
-    assert "editAdaptedLine" in HTML
-    assert "Saved to context-applied subtitle" in HTML
+    assert "editLineText" in HTML
+    assert "lineDraftRef" in HTML
+    assert "Saved ${label}." in HTML
     assert "auto-save to the context-applied English subtitle file" in HTML
     assert "Reference subtitles" in HTML
     assert "Optional outside subtitle track" in HTML

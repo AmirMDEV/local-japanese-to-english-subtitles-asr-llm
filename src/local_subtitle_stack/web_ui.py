@@ -357,7 +357,7 @@ HTML = r"""<!doctype html>
     .preview-row.active { border-color: var(--accent); }
     .preview-row.selected { background: rgba(255,216,77,.12); border-color: rgba(255,216,77,.55); }
     .preview-header, .preview-row {
-      grid-template-columns: 112px minmax(0, 1fr) minmax(0, 1.08fr);
+      grid-template-columns: 112px minmax(0, .95fr) minmax(0, 1fr) minmax(0, 1.05fr);
       align-items: start;
     }
     .preview-header {
@@ -549,6 +549,7 @@ HTML = r"""<!doctype html>
       .model-settings-panel .panel-body { grid-template-columns: 1fr; }
       .two-col { grid-template-columns: 1fr; }
       .diagnostics-grid { grid-template-columns: 1fr; }
+      .preview-header, .preview-row { grid-template-columns: 1fr; }
       .guided-grid { grid-template-columns: 1fr; }
       .workflow {
         grid-auto-flow: column;
@@ -643,6 +644,7 @@ HTML = r"""<!doctype html>
       const [dropRole, setDropRole] = React.useState("direct");
       const [lineSaveStatus, setLineSaveStatus] = React.useState("");
       const lineSaveTimer = React.useRef(null);
+      const lineDraftRef = React.useRef(null);
       const [restoreStatus, setRestoreStatus] = React.useState({});
       const [batchLabel, setBatchLabel] = React.useState("");
       const [context, setContext] = React.useState("");
@@ -701,12 +703,16 @@ HTML = r"""<!doctype html>
       React.useEffect(() => {
         if (!selectedJobId) return;
         const id = setInterval(() => {
-          api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob).catch(err => setError(err.message));
+          api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(data => {
+            const draft = lineDraftRef.current;
+            setJob(draft ? {...data, preview:(data.preview || []).map(row => row.cue_index === draft.cue_index ? {...row, ...draft.values} : row)} : data);
+          }).catch(err => setError(err.message));
         }, 1500);
         return () => clearInterval(id);
       }, [selectedJobId]);
       React.useEffect(() => {
         setLineSaveStatus("");
+        lineDraftRef.current = null;
         if (lineSaveTimer.current) clearTimeout(lineSaveTimer.current);
       }, [selectedJobId, line?.cue_index]);
 
@@ -769,30 +775,36 @@ HTML = r"""<!doctype html>
           setError(err.message);
         }
       };
-      const saveLine = () => line && selectedJobId && post("/api/job/line", {
+      const linePayload = nextLine => ({
         job_id:selectedJobId,
-        cue_index:line.cue_index,
-        japanese_text:line.has_japanese ? line.japanese : null,
-        literal_english_text:line.has_literal_english ? line.literal_english : null,
-        adapted_english_text:line.has_adapted_english ? line.adapted_english : null,
-        reference_text:line.has_reference ? line.reference : null
-      }, () => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob));
-      const editAdaptedLine = value => {
+        cue_index:nextLine.cue_index,
+        japanese_text:nextLine.has_japanese ? nextLine.japanese : null,
+        literal_english_text:nextLine.has_literal_english ? nextLine.literal_english : null,
+        adapted_english_text:nextLine.has_adapted_english ? nextLine.adapted_english : null,
+        reference_text:nextLine.has_reference ? nextLine.reference : null
+      });
+      const saveLine = () => line && selectedJobId && post("/api/job/line", linePayload(line), () => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob));
+      const editLineText = (field, value, label) => {
         if (!line) return;
-        const nextLine = {...line, adapted_english:value};
+        const nextLine = {...line, [field]:value};
         setLine(nextLine);
+        lineDraftRef.current = {
+          cue_index: nextLine.cue_index,
+          values: {...(lineDraftRef.current?.cue_index === nextLine.cue_index ? lineDraftRef.current.values : {}), [field]:value}
+        };
+        setJob(current => current ? {...current, preview:(current.preview || []).map(row => row.cue_index === nextLine.cue_index ? {...row, [field]:value} : row)} : current);
         if (lineSaveTimer.current) clearTimeout(lineSaveTimer.current);
-        if (!selectedJobId || !nextLine.has_adapted_english) return;
+        if (!selectedJobId || !nextLine[`has_${field}`]) return;
         if (!value.trim()) {
-          setLineSaveStatus("Not saved: context-applied English cannot be empty.");
+          setLineSaveStatus(`Not saved: ${label} cannot be empty.`);
           return;
         }
-        setLineSaveStatus("Saving context-applied English...");
+        setLineSaveStatus(`Saving ${label}...`);
         lineSaveTimer.current = setTimeout(() => {
-          api("/api/job/line", {job_id:selectedJobId, cue_index:nextLine.cue_index, adapted_english_text:value})
+          api("/api/job/line", linePayload(nextLine))
             .then(() => {
-              setLineSaveStatus("Saved to context-applied subtitle.");
-              setJob(current => current ? {...current, preview:(current.preview || []).map(row => row.cue_index === nextLine.cue_index ? {...row, adapted_english:value} : row)} : current);
+              setLineSaveStatus(`Saved ${label}.`);
+              lineDraftRef.current = null;
             })
             .catch(err => { setError(err.message); setLineSaveStatus("Save failed."); });
         }, 700);
@@ -1088,7 +1100,8 @@ HTML = r"""<!doctype html>
                   e("div", {className:"preview-header", key:"preview-header"},
                     e("span", null, "Time"),
                     e("span", null, "Japanese subtitles"),
-                    e("span", null, "Direct English translation")
+                    e("span", null, "Direct English translation"),
+                    e("span", null, "Context-applied English")
                   ),
                   ...job.preview.map(row => e("div", {key:row.cue_index, role:"button", tabIndex:0, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""} ${selectedCueIndexes.includes(row.cue_index)?"selected":""}`, onClick:ev=>toggleCue(row, ev), onKeyDown:ev=>{ if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggleCue(row, ev); } }},
                     e("span", {className:"preview-time"},
@@ -1096,7 +1109,8 @@ HTML = r"""<!doctype html>
                       e("span", {className:"preview-range"}, formatPreviewRange(row))
                     ),
                     e("span", {className:row.japanese ? "preview-text" : "preview-empty"}, row.japanese || "No Japanese loaded"),
-                    e("span", {className:row.literal_english ? "preview-text" : "preview-empty"}, row.literal_english || "No direct English loaded")
+                    e("span", {className:row.literal_english ? "preview-text" : "preview-empty"}, row.literal_english || "No direct English loaded"),
+                    e("span", {className:row.adapted_english ? "preview-text" : "preview-empty"}, row.adapted_english || "No context-applied English loaded")
                   ))
                 ] : e("div", {className:"drop-zone", onDragOver:ev=>ev.preventDefault(), onDrop:dropSubtitle},
                   e("strong", null, "Drop an .srt file here to edit existing subtitles"),
@@ -1106,7 +1120,7 @@ HTML = r"""<!doctype html>
                   e("label", {className:"line-edit-field"},
                     e("strong", null, "Japanese source subtitles"),
                     e("span", null, "What the listening model heard. Edit this if the Japanese transcript is wrong."),
-                    e("textarea", {value:line.japanese || "", onChange:ev=>setLine({...line, japanese:ev.target.value}), placeholder:"Japanese source subtitles"})
+                    e("textarea", {value:line.japanese || "", onChange:ev=>editLineText("japanese", ev.target.value, "Japanese source subtitles"), placeholder:"Japanese source subtitles"})
                   ),
                   e("label", {className:"line-edit-field"},
                     e("strong", null, "Direct English translation"),
@@ -1116,7 +1130,7 @@ HTML = r"""<!doctype html>
                   e("label", {className:"line-edit-field"},
                     e("strong", null, "Context-applied English"),
                     e("span", null, "Final subtitle text. Edits here auto-save to the context-applied English subtitle file after you stop typing."),
-                    e("textarea", {value:line.adapted_english || "", onChange:ev=>editAdaptedLine(ev.target.value), placeholder:"Context-applied English"}),
+                    e("textarea", {value:line.adapted_english || "", onChange:ev=>editLineText("adapted_english", ev.target.value, "context-applied English"), placeholder:"Context-applied English"}),
                     lineSaveStatus ? e("span", {className:"tiny"}, lineSaveStatus) : null
                   ),
                   e("label", {className:"line-edit-field"},
