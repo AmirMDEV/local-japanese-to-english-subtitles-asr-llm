@@ -211,6 +211,7 @@ HTML = r"""<!doctype html>
     .model-row:first-child { border-top: 0; padding-top: 0; }
     .model-row span:first-child { color: var(--muted); font-size: 12px; font-weight: 700; }
     .job-list, .preview-list, .note-list { display: grid; gap: 8px; max-height: min(42vh, 480px); overflow: auto; }
+    .preview-list { max-height: min(58vh, 680px); }
     .job-row, .preview-row, .note-row {
       width: 100%;
       text-align: left;
@@ -223,6 +224,16 @@ HTML = r"""<!doctype html>
     }
     .job-row.active, .preview-row.active { border-color: var(--accent); }
     .preview-row.selected { background: rgba(255,216,77,.12); border-color: rgba(255,216,77,.55); }
+    .range-card {
+      display: grid;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid rgba(255,255,255,.1);
+      border-radius: 8px;
+      background: rgba(0,0,0,.14);
+    }
+    .range-card textarea { min-height: 76px; }
+    .range-card-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
     .section-note { color: var(--muted); margin: 0; }
     textarea {
       min-height: 90px;
@@ -342,6 +353,8 @@ HTML = r"""<!doctype html>
         transcribe: "Transcribe source language",
         literal: "Make direct English translation",
         adapted: "Make context-applied English",
+        translate_literal: "Make direct English translation",
+        translate_adapted: "Make context-applied English",
         finalize: "Save subtitle files"
       })[stage] || (stage || "Not started");
     const jobStepText = row => {
@@ -454,18 +467,40 @@ HTML = r"""<!doctype html>
       const chooseCacheFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, cache_paths:{...current.cache_paths, hf_hub_cache:d.path}}))).catch(err => setError(err.message));
       const chooseAsrFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, models:{...current.models, asr:d.path}}))).catch(err => setError(err.message));
       const selectedPreviewRows = () => (job?.preview || []).filter(row => selectedCueIndexes.includes(row.cue_index));
-      const setRangeFromSelection = () => {
+      const rangeFromRows = rows => rows.length ? {
+        start: formatClock(Math.min(...rows.map(row => Number(row.start)))),
+        end: formatClock(Math.max(...rows.map(row => Number(row.end))))
+      } : null;
+      const applyRange = range => {
+        if (!range) return;
+        setNoteStart(range.start);
+        setNoteEnd(range.end);
+      };
+      const setRangeFromSelection = () => applyRange(rangeFromRows(selectedPreviewRows()));
+      React.useEffect(() => {
         const rows = selectedPreviewRows();
         if (!rows.length) return;
-        setNoteStart(formatClock(Math.min(...rows.map(row => Number(row.start)))));
-        setNoteEnd(formatClock(Math.max(...rows.map(row => Number(row.end)))));
-      };
+        applyRange(rangeFromRows(rows));
+      }, [selectedCueIndexes, job]);
       const addContextForSelection = () => {
         setRangeFromSelection();
-        if (!noteText.trim()) setNoteText("Scene context for selected subtitle lines.");
+        if (!noteText.trim()) setNoteText("");
       };
+      const updateNote = (index, patch) => setNotes(current => current.map((item, noteIndex) => noteIndex === index ? {...item, ...patch} : item));
+      const removeNote = index => setNotes(current => current.filter((_item, noteIndex) => noteIndex !== index));
       const toggleCue = (row, ev) => {
-        if (ev.shiftKey || ev.ctrlKey || ev.metaKey) {
+        if (ev.shiftKey && selectedCueIndexes.length) {
+          const preview = job?.preview || [];
+          const lastIndex = preview.findIndex(item => item.cue_index === selectedCueIndexes[selectedCueIndexes.length - 1]);
+          const rowIndex = preview.findIndex(item => item.cue_index === row.cue_index);
+          if (lastIndex >= 0 && rowIndex >= 0) {
+            const start = Math.min(lastIndex, rowIndex);
+            const end = Math.max(lastIndex, rowIndex);
+            setSelectedCueIndexes(preview.slice(start, end + 1).map(item => item.cue_index));
+          } else {
+            setSelectedCueIndexes(current => current.includes(row.cue_index) ? current.filter(value => value !== row.cue_index) : current.concat(row.cue_index));
+          }
+        } else if (ev.ctrlKey || ev.metaKey) {
           setSelectedCueIndexes(current => current.includes(row.cue_index) ? current.filter(value => value !== row.cue_index) : current.concat(row.cue_index));
         } else {
           setSelectedCueIndexes([row.cue_index]);
@@ -575,7 +610,7 @@ HTML = r"""<!doctype html>
               e("div", {className:"panel-body job-list"},
                 jobs.length ? jobs.map(row => e("button", {key:row.job_id, className:`job-row ${row.job_id===selectedJobId?"active":""}`, onClick:()=>setSelectedJobId(row.job_id)},
                   e("strong", null, row.source),
-                  e("span", {className:"tiny"}, `${row.status} | ${row.stage} | ${row.overall_progress_percent || 0}%`),
+                  e("span", {className:"tiny"}, `${row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
                   e("span", null, jobStepText(row))
                 )) : e("div", {className:"empty"}, "No jobs yet.")
               )
@@ -610,7 +645,7 @@ HTML = r"""<!doctype html>
             e("section", {className:"panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Preview and line editor"), e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob)}, "Reload")),
               e("div", {className:"panel-body stack"},
-                e("p", {className:"section-note"}, "Click one line to edit it. Ctrl-click or Shift-click several lines, then add scene context or rerun only that range."),
+                e("p", {className:"section-note"}, "Click a line to edit it. Ctrl-click adds separate lines. Shift-click selects a continuous range and fills the time-range context below."),
                 e("div", {className:"field"},
                   e("label", null, "Dropped subtitle type"),
                   e("select", {value:dropRole, onChange:ev=>setDropRole(ev.target.value)},
@@ -634,24 +669,44 @@ HTML = r"""<!doctype html>
               )
             ),
             e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Translation context and rerun"), e("span", null, selectedCueIndexes.length ? `${selectedCueIndexes.length} line(s)` : (status.rebuild_running ? "Running" : "Idle"))),
+              e("div", {className:"panel-head"}, e("strong", null, "Overall video context"), e("span", null, status.rebuild_running ? "Running" : "Idle")),
               e("div", {className:"panel-body stack"},
-                e("p", {className:"section-note"}, "Context is added to every English translation prompt. The Japanese listening step does not use this text; it listens first, then the English model translates with this context."),
+                e("p", {className:"section-note"}, "This text is added to every English translation prompt after the Japanese audio has been transcribed. Use it for names, relationships, tone, slang, and story so far."),
                 e("input", {value:batchLabel, onChange:ev=>setBatchLabel(ev.target.value), placeholder:"Series or project name, e.g. MARA-018 or Show title"}),
                 e("textarea", {value:context, onChange:ev=>setContext(ev.target.value), placeholder:"Overall video context used in every translation prompt: character names, relationships, tone, slang, setting, story so far"}),
                 e("div", {className:"button-row"},
-                  e("button", {className:"secondary", disabled:!selectedCueIndexes.length, onClick:setRangeFromSelection}, "Use selected line times"),
-                  e("button", {className:"secondary", disabled:!selectedCueIndexes.length, onClick:addContextForSelection}, "Context for selection")
-                ),
-                e("div", {className:"two-col"}, e("input", {value:noteStart, onChange:ev=>setNoteStart(ev.target.value), placeholder:"Start time, e.g. 00:12:04"}), e("input", {value:noteEnd, onChange:ev=>setNoteEnd(ev.target.value), placeholder:"End time, e.g. 00:12:22"})),
-                e("textarea", {value:noteText, onChange:ev=>setNoteText(ev.target.value), placeholder:"Scene-specific context for this time range: who is speaking, intended meaning, local joke, relationship change"}),
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:saveNotes}, "Save context"),
+                  e("button", {disabled:!selectedJobId, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Retranslate whole job with context")
+                )
+              )
+            ),
+            e("section", {className:"panel"},
+              e("div", {className:"panel-head"}, e("strong", null, "Time-range context"), e("span", null, selectedCueIndexes.length ? `${selectedCueIndexes.length} selected` : "Select subtitle lines")),
+              e("div", {className:"panel-body stack"},
+                e("p", {className:"section-note"}, "Select subtitle lines in the preview. Start and end times fill automatically. Add as many context ranges as needed, then retranslate the selected time range or save them for the full job."),
                 e("div", {className:"button-row"},
-                  e("button", {className:"secondary", onClick:addNote}, "Add note"),
-                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:saveNotes}, "Save notes"),
-                  e("button", {disabled:!selectedJobId, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Retranslate whole job"),
-                  e("button", {disabled:!selectedJobId || (!selectedCueIndexes.length && (!noteStart || !noteEnd)), onClick:redoSelectedRange}, "Retranslate selected lines")
+                  e("button", {className:"secondary", disabled:!selectedCueIndexes.length, onClick:setRangeFromSelection}, "Fill times from selected lines"),
+                  e("button", {className:"secondary", disabled:!selectedCueIndexes.length, onClick:addContextForSelection}, "New context block from selection")
                 ),
-                e("div", {className:"note-list"}, notes.map((item, index) => e("div", {className:"note-row", key:index}, e("strong", null, `${item.start_seconds}-${item.end_seconds}`), e("span", null, item.notes))))
+                e("p", {className:"tiny"}, "Selected subtitle lines fill these times automatically. You can still type a time range by hand."),
+                e("div", {className:"two-col"}, e("input", {value:noteStart, onChange:ev=>setNoteStart(ev.target.value), placeholder:"Start time, e.g. 00:12:04"}), e("input", {value:noteEnd, onChange:ev=>setNoteEnd(ev.target.value), placeholder:"End time, e.g. 00:12:22"})),
+                e("textarea", {value:noteText, onChange:ev=>setNoteText(ev.target.value), placeholder:"What happens in this time range: who is speaking, intended meaning, local joke, relationship change, tone shift"}),
+                e("div", {className:"button-row"},
+                  e("button", {className:"secondary", onClick:addNote}, "Add time-range context"),
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:saveNotes}, "Save all context ranges"),
+                  e("button", {disabled:!selectedJobId || (!selectedCueIndexes.length && (!noteStart || !noteEnd)), onClick:redoSelectedRange}, "Retranslate selected time range")
+                ),
+                e("div", {className:"note-list"}, notes.length ? notes.map((item, index) => e("div", {className:"range-card", key:index},
+                  e("div", {className:"range-card-head"},
+                    e("strong", null, `Context range ${index + 1}`),
+                    e("button", {className:"danger", onClick:()=>removeNote(index)}, "Remove")
+                  ),
+                  e("div", {className:"two-col"},
+                    e("input", {value:formatClock(Number(item.start_seconds || 0)), onChange:ev=>updateNote(index, {start_seconds:timeToSeconds(ev.target.value)}), placeholder:"Start time"}),
+                    e("input", {value:formatClock(Number(item.end_seconds || 0)), onChange:ev=>updateNote(index, {end_seconds:timeToSeconds(ev.target.value)}), placeholder:"End time"})
+                  ),
+                  e("textarea", {value:item.notes || "", onChange:ev=>updateNote(index, {notes:ev.target.value}), placeholder:"Context for this range"})
+                )) : e("div", {className:"empty"}, "No time-range context yet. Select subtitle lines above, add context, then save."))
               )
             ),
             e("section", {className:"panel"},
@@ -735,7 +790,7 @@ HTML = r"""<!doctype html>
                 ),
                 e("div", {className:"guided-grid"},
                   e("input", {value:importDraft.easy || "", readOnly:true, placeholder:"Context-applied English SRT"}),
-                  e("button", {className:"secondary", onClick:()=>chooseSubtitle("easy")}, "Pick natural")
+                    e("button", {className:"secondary", onClick:()=>chooseSubtitle("easy")}, "Pick context-applied")
                 ),
                 e("div", {className:"guided-grid"},
                   e("input", {value:importDraft.reference || "", readOnly:true, placeholder:"Reference SRT"}),

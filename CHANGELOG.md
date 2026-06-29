@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Split web translation context into overall video context and time-range context, with Shift-click range selection, automatic start/end time fill, editable context range cards, and selected-range retranslation wording.
 - Renamed user-facing translation labels across web, desktop, CLI help, and docs: direct output is now `direct English translation`, and adapted output is now `context-applied English`.
 - Clarified the web context panel so overall context is described as English-translation prompt context, renamed batch label to series/project name, and made scene-note wording time-range specific.
 - Fixed web worker status after restarting the browser UI, auto-selecting newly loaded jobs, closing stale web UI instances on launch, and showing translation progress as soon as a subtitle group starts.

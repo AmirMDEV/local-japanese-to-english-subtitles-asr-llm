@@ -37,7 +37,15 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Context-applied English" in HTML
     assert "Open review bundle in Subtitle Edit" in HTML
     assert "Add files and start processing" in HTML
-    assert "Context is added to every English translation prompt" in HTML
+    assert "added to every English translation prompt after the Japanese audio has been transcribed" in HTML
+    assert "Overall video context" in HTML
+    assert "Time-range context" in HTML
+    assert "Selected subtitle lines fill these times automatically" in HTML
+    assert "Add time-range context" in HTML
+    assert "Retranslate selected time range" in HTML
+    assert "Shift-click selects a continuous range" in HTML
+    assert "Pick context-applied" in HTML
+    assert "Pick natural" not in HTML
     assert "Series or project name" in HTML
     assert "Drop an .srt file here to edit existing subtitles" in HTML
     assert "/api/upload-subtitle" in HTML
