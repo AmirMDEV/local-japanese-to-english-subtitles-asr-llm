@@ -312,6 +312,101 @@ class TransformersASRClient:
         gc.collect()
 
 
+class Qwen3ASRClient:
+    ALIGNER_MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
+    INSTALL_HINT = (
+        "Qwen3-ASR is optional. Install it with `py -3.11 -m pip install qwen-asr` "
+        "and restart the app. Timestamps use Qwen/Qwen3-ForcedAligner-0.6B."
+    )
+
+    def __init__(self, model_id: str, cache_dir: str | None = None) -> None:
+        self.model_id = model_id
+        self.cache_dir = cache_dir or None
+        self._model: Any | None = None
+        self._device: str | None = None
+
+    def _load(self, device: str, batch_size: int) -> Any:
+        if self._model is not None and self._device == device:
+            return self._model
+        if self.cache_dir:
+            os.environ.setdefault("HUGGINGFACE_HUB_CACHE", self.cache_dir)
+        try:
+            import torch
+            from qwen_asr import Qwen3ASRModel
+        except ModuleNotFoundError as exc:
+            missing = exc.name or "qwen-asr"
+            raise ExternalToolError(f"{self.INSTALL_HINT} Missing Python package: {missing}") from exc
+
+        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+        device_map = "cuda:0" if device == "cuda" else "cpu"
+        self._model = Qwen3ASRModel.from_pretrained(
+            self.model_id,
+            dtype=dtype,
+            device_map=device_map,
+            max_inference_batch_size=max(int(batch_size or 1), 1),
+            max_new_tokens=512,
+            forced_aligner=self.ALIGNER_MODEL_ID,
+            forced_aligner_kwargs={"dtype": dtype, "device_map": device_map},
+        )
+        self._device = device
+        return self._model
+
+    def transcribe_chunk(self, chunk_path: Path, batch_size: int, device: str) -> list[Cue]:
+        model = self._load(device=device, batch_size=batch_size)
+        results = model.transcribe(
+            audio=str(chunk_path),
+            language="Japanese",
+            return_time_stamps=True,
+        )
+        result = results[0] if isinstance(results, list) and results else results
+        return self._result_to_cues(result, self._wave_duration_seconds(chunk_path))
+
+    def _wave_duration_seconds(self, chunk_path: Path) -> float:
+        try:
+            with wave.open(str(chunk_path), "rb") as audio:
+                rate = audio.getframerate()
+                if rate > 0:
+                    return audio.getnframes() / float(rate)
+        except (OSError, wave.Error):
+            return 0.0
+        return 0.0
+
+    def _result_to_cues(self, result: Any, chunk_duration: float) -> list[Cue]:
+        text = str(getattr(result, "text", "") or "").strip()
+        stamps = list(getattr(result, "time_stamps", []) or [])
+        cues: list[Cue] = []
+        for index, stamp in enumerate(stamps, start=1):
+            stamp_text = self._stamp_value(stamp, "text", "").strip()
+            if not stamp_text:
+                continue
+            start = float(self._stamp_value(stamp, "start_time", self._stamp_value(stamp, "start", 0.0)) or 0.0)
+            end = float(self._stamp_value(stamp, "end_time", self._stamp_value(stamp, "end", start + 0.8)) or start + 0.8)
+            cues.append(Cue(index=index, start=max(start, 0.0), end=max(end, start + 0.2), text=stamp_text))
+        if cues:
+            return cues
+        if not text:
+            return []
+        end = chunk_duration if chunk_duration > 0 else 3.0
+        return [Cue(index=1, start=0.0, end=max(end, 0.5), text=text)]
+
+    def _stamp_value(self, stamp: Any, key: str, default: Any) -> Any:
+        if isinstance(stamp, dict):
+            return stamp.get(key, default)
+        return getattr(stamp, key, default)
+
+    def close(self) -> None:
+        self._model = None
+        self._device = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        gc.collect()
+
+
 class ReazonSpeechK2ASRClient:
     INSTALL_HINT = (
         "ReazonSpeech k2 is optional. Install it with "

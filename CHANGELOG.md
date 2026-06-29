@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Added Qwen3-ASR 0.6B and 1.7B Japanese listening choices, routed them through the optional `qwen-asr` package with `Qwen/Qwen3-ForcedAligner-0.6B` timestamps, and recorded speaker separation as not enabled yet.
 - Added surrounding Japanese subtitle context to selected-range English retranslation prompts, while still replacing only the selected subtitle lines.
 - Added source-side resume state JSON beside exported subtitles and made the web preview poll the selected job so partial Japanese subtitles appear while transcription is still running.
 - Audited the full web UI scroll layout on desktop and mobile, then tightened the workflow order: compact mobile step cards, two-column desktop model settings, existing-subtitle import beside input selection, jobs beside review, and automatic first-job selection on reload.

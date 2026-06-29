@@ -16,7 +16,7 @@ from .adaptive_transcription import (
     ordered_profile_candidates,
 )
 from .config import AppConfig
-from .asr_models import REAZON_K2_ENGINE, REAZON_K2_MODEL_ID
+from .asr_models import QWEN3_ASR_1_7B_MODEL_ID, QWEN3_ASR_ENGINE, REAZON_K2_ENGINE, REAZON_K2_MODEL_ID
 from .domain import (
     JOB_STATUS_COMPLETED,
     JOB_STATUS_QUEUED,
@@ -47,6 +47,7 @@ from .integrations import (
     FFmpegClient,
     OllamaClient,
     ReazonSpeechK2ASRClient,
+    Qwen3ASRClient,
     SubtitleEditClient,
     TransformersASRClient,
     load_cues,
@@ -100,6 +101,7 @@ STAGE_DISPLAY_LABELS = {
 
 ASR_ENGINE_FASTER_WHISPER = "faster-whisper"
 ASR_ENGINE_KOTOBA = "kotoba"
+ASR_ENGINE_QWEN3 = QWEN3_ASR_ENGINE
 ASR_ENGINE_REAZON_K2 = REAZON_K2_ENGINE
 REAZON_K2_CHUNK_SECONDS = 6
 
@@ -1195,6 +1197,8 @@ class WorkerService:
             return ASR_ENGINE_FASTER_WHISPER
         if normalized in {"kotoba", "transformers", "kotoba-whisper"}:
             return ASR_ENGINE_KOTOBA
+        if normalized in {"qwen3-asr", "qwen3 asr", "qwen-asr", "qwen asr", "qwen"}:
+            return ASR_ENGINE_QWEN3
         if normalized in {"reazonspeech-k2", "reazonspeech k2", "reazon-k2", "reazon", "reazonspeech-k2-experimental"}:
             return ASR_ENGINE_REAZON_K2
         return ASR_ENGINE_FASTER_WHISPER
@@ -1203,6 +1207,8 @@ class WorkerService:
         configured = str(getattr(self.config.models, "asr", "") or "").strip()
         if self._asr_engine() == ASR_ENGINE_REAZON_K2 and "reazonspeech" not in configured.lower():
             return REAZON_K2_MODEL_ID
+        if self._asr_engine() == ASR_ENGINE_QWEN3 and "qwen/qwen3-asr" not in configured.lower():
+            return QWEN3_ASR_1_7B_MODEL_ID
         return configured
 
     def _faster_whisper_profile_name(self) -> str:
@@ -1382,6 +1388,20 @@ class WorkerService:
                     "model_id": model_id,
                     "mode": "chunked-reazonspeech-k2",
                     "benchmark_note": "Reported CER: JSUT 6.45, Common Voice v8 Japanese 7.85, TEDxJP-10K 9.09.",
+                }
+            )
+        elif engine == ASR_ENGINE_QWEN3:
+            asr = Qwen3ASRClient(
+                model_id,
+                cache_dir=self.config.cache_paths.hf_hub_cache or None,
+            )
+            checkpoint.details.update(
+                {
+                    "engine": ASR_ENGINE_QWEN3,
+                    "model_id": model_id,
+                    "mode": "chunked-qwen3-asr-forced-aligner",
+                    "aligner_model_id": Qwen3ASRClient.ALIGNER_MODEL_ID,
+                    "speaker_separation": "not-enabled",
                 }
             )
         else:

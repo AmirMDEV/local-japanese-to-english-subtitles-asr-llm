@@ -71,6 +71,7 @@ RECOMMENDED_TRANSLATION_MODEL = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggre
 ASR_ENGINE_LABELS = {
     "kotoba": "Kotoba Japanese quality (recommended)",
     "reazonspeech-k2": "ReazonSpeech k2 Japanese ASR (experimental)",
+    "qwen3-asr": "Qwen3-ASR with forced aligner (experimental)",
     "faster-whisper": "Fast local Whisper",
 }
 ASR_ENGINE_KEYS_BY_LABEL = {label: key for key, label in ASR_ENGINE_LABELS.items()}

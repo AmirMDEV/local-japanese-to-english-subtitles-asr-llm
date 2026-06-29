@@ -3,11 +3,12 @@ from __future__ import annotations
 import builtins
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import requests
 
-from local_subtitle_stack.integrations import ExternalToolError, OllamaClient, ReazonSpeechK2ASRClient
+from local_subtitle_stack.integrations import ExternalToolError, OllamaClient, Qwen3ASRClient, ReazonSpeechK2ASRClient
 
 
 class FakeResponse:
@@ -119,3 +120,35 @@ def test_reazonspeech_k2_missing_dependency_has_clear_message(monkeypatch: pytes
 
     with pytest.raises(ExternalToolError, match="ReazonSpeech k2 is optional"):
         client.transcribe_chunk(Path("missing.wav"), batch_size=1, device="cpu")
+
+
+def test_qwen3_asr_missing_dependency_has_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "qwen_asr":
+            raise ModuleNotFoundError("No module named 'qwen_asr'", name="qwen_asr")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    client = Qwen3ASRClient("Qwen/Qwen3-ASR-0.6B")
+
+    with pytest.raises(ExternalToolError, match="Qwen3-ASR is optional"):
+        client.transcribe_chunk(Path("missing.wav"), batch_size=1, device="cpu")
+
+
+def test_qwen3_asr_result_timestamps_become_cues() -> None:
+    client = Qwen3ASRClient("Qwen/Qwen3-ASR-0.6B")
+    result = SimpleNamespace(
+        text="",
+        time_stamps=[
+            SimpleNamespace(text="ã¯ã„", start_time=0.1, end_time=0.9),
+            {"text": "ãŠé¡˜ã„", "start_time": 1.0, "end_time": 2.0},
+        ],
+    )
+
+    cues = client._result_to_cues(result, chunk_duration=3.0)
+
+    assert [cue.text for cue in cues] == ["ã¯ã„", "ãŠé¡˜ã„"]
+    assert cues[0].start == 0.1
+    assert cues[1].end == 2.0

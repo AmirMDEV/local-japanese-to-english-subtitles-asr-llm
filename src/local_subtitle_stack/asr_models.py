@@ -25,6 +25,10 @@ class ASRCandidate:
 
 REAZON_K2_ENGINE = "reazonspeech-k2"
 REAZON_K2_MODEL_ID = "reazon-research/reazonspeech-k2-v2"
+QWEN3_ASR_ENGINE = "qwen3-asr"
+QWEN3_ASR_0_6B_MODEL_ID = "Qwen/Qwen3-ASR-0.6B"
+QWEN3_ASR_1_7B_MODEL_ID = "Qwen/Qwen3-ASR-1.7B"
+QWEN3_FORCED_ALIGNER_MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
 
 
 ASR_CANDIDATES: tuple[ASRCandidate, ...] = (
@@ -72,14 +76,34 @@ ASR_CANDIDATES: tuple[ASRCandidate, ...] = (
         ),
     ),
     ASRCandidate(
+        key="qwen3-asr-0.6b",
+        label="Qwen3-ASR 0.6B with forced aligner",
+        engine=QWEN3_ASR_ENGINE,
+        model_id=QWEN3_ASR_0_6B_MODEL_ID,
+        status="research",
+        summary=(
+            "Smaller Qwen3-ASR model with Japanese support and Qwen forced aligner timestamps. "
+            "Good faster Qwen option before trying the 1.7B model."
+        ),
+        metrics=(
+            ASRMetric("Open ASR leaderboard mean", "WER", 8.86),
+            ASRMetric("Multilingual FLEURS 12-language average", "WER", 7.57, "Includes Japanese but is not Japanese-only."),
+            ASRMetric("Multilingual Common Voice 13-language average", "WER", 12.75, "Includes Japanese but is not Japanese-only."),
+        ),
+        sources=(
+            "https://huggingface.co/Qwen/Qwen3-ASR-0.6B",
+            "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B",
+        ),
+    ),
+    ASRCandidate(
         key="qwen3-asr-1.7b",
-        label="Qwen3-ASR 1.7B",
-        engine="qwen3-asr",
-        model_id="Qwen/Qwen3-ASR-1.7B",
+        label="Qwen3-ASR 1.7B with forced aligner",
+        engine=QWEN3_ASR_ENGINE,
+        model_id=QWEN3_ASR_1_7B_MODEL_ID,
         status="research",
         summary=(
             "Strong open ASR leaderboard model with Japanese in its multilingual sets and "
-            "a separate forced aligner. Needs a new dependency stack before production use."
+            "Qwen forced aligner timestamps. Higher quality Qwen option, heavier than 0.6B."
         ),
         metrics=(
             ASRMetric("Open ASR leaderboard mean", "WER", 5.76),
@@ -88,6 +112,7 @@ ASR_CANDIDATES: tuple[ASRCandidate, ...] = (
         ),
         sources=(
             "https://huggingface.co/Qwen/Qwen3-ASR-1.7B",
+            "https://huggingface.co/Qwen/Qwen3-ForcedAligner-0.6B",
             "https://arxiv.org/abs/2601.21337",
         ),
     ),

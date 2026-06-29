@@ -176,6 +176,16 @@ py -3.11 -m pip install "git+https://github.com/reazon-research/ReazonSpeech.git
 
 Then choose `ReazonSpeech k2 Japanese ASR (experimental)` in the app. The full model notes are in [ASR Model Evaluation](docs/asr-model-evaluation.md).
 
+Qwen3-ASR 0.6B and 1.7B are also available as experimental Japanese listening choices. They use `Qwen/Qwen3-ForcedAligner-0.6B` for subtitle timestamps.
+
+Install the optional runtime with:
+
+```powershell
+py -3.11 -m pip install qwen-asr
+```
+
+Then choose `Qwen3-ASR 0.6B with forced aligner` or `Qwen3-ASR 1.7B with forced aligner` in the web app model dropdown. Speaker separation is not enabled yet; Qwen ASR provides recognition and forced alignment, while diarization needs a separate speaker-separation backend.
+
 ### 6. First Transcription Run
 
 Now try one small video first:

@@ -23,7 +23,7 @@ from local_subtitle_stack.domain import (
 from local_subtitle_stack.guards import ResourceSnapshot
 from local_subtitle_stack.integrations import SubtitleEditClient
 from local_subtitle_stack.queue import QueueError, QueueStore
-from local_subtitle_stack.service import ASR_ENGINE_REAZON_K2, WorkerService
+from local_subtitle_stack.service import ASR_ENGINE_QWEN3, ASR_ENGINE_REAZON_K2, WorkerService
 from local_subtitle_stack.utils import subtitle_output_dir
 
 
@@ -131,6 +131,18 @@ class FakeReazonK2ASR(FakeASR):
         return [
             Cue(index=1, start=0.0, end=1.4, text="レアゾン音声認識"),
             Cue(index=2, start=1.8, end=3.0, text="テストです"),
+        ]
+
+
+class FakeQwen3ASR(FakeASR):
+    ALIGNER_MODEL_ID = "Qwen/Qwen3-ForcedAligner-0.6B"
+
+    def transcribe_chunk(self, chunk_path: Path, batch_size: int, device: str) -> list[Cue]:
+        assert batch_size >= 1
+        assert device == "cpu"
+        return [
+            Cue(index=1, start=0.0, end=1.1, text="qwen san"),
+            Cue(index=2, start=1.4, end=2.8, text="asr desu"),
         ]
 
 
@@ -432,6 +444,31 @@ def test_reazonspeech_k2_engine_uses_short_cpu_chunks(
     assert details["engine"] == "reazonspeech-k2"
     assert details["model_id"] == "reazon-research/reazonspeech-k2-v2"
     assert extract_details["chunk_seconds"] == 6
+    assert loaded.checkpoint(STAGE_TRANSCRIBE).status == "completed"
+
+
+def test_qwen3_asr_engine_uses_forced_aligner_client(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    monkeypatch.setattr("local_subtitle_stack.service.Qwen3ASRClient", FakeQwen3ASR)
+    service = build_service(tmp_path, SuccessfulOllama())
+    service.config.models.asr_engine = "qwen3-asr"
+    service.config.models.asr = "Qwen/Qwen3-ASR-0.6B"
+    source = tmp_path / "qwen-scene.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default", include_adapted_english=False)
+
+    service.run_until_empty()
+
+    assert service._asr_engine() == ASR_ENGINE_QWEN3
+    _job_dir, loaded = service.store.find_job(manifest.job_id)
+    details = loaded.checkpoint(STAGE_TRANSCRIBE).details
+    assert details["engine"] == "qwen3-asr"
+    assert details["model_id"] == "Qwen/Qwen3-ASR-0.6B"
+    assert details["mode"] == "chunked-qwen3-asr-forced-aligner"
+    assert details["speaker_separation"] == "not-enabled"
     assert loaded.checkpoint(STAGE_TRANSCRIBE).status == "completed"
 
 

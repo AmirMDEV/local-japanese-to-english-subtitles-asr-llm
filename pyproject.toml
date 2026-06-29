@@ -28,6 +28,9 @@ dev = [
 reazon-k2 = [
   "reazonspeech-k2-asr @ git+https://github.com/reazon-research/ReazonSpeech.git@master#subdirectory=pkg/k2-asr",
 ]
+qwen3-asr = [
+  "qwen-asr",
+]
 gpu = [
   "torch>=2.6",
 ]
