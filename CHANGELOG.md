@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Made the web UI more guided: model settings now use dropdowns and picker buttons, existing-subtitle import has clearer labels, and subtitle preview supports multi-line selection for scene context and selected-range retranslation.
 - Renamed the web UI to Fast Multilanguage Transcriber and added queue, job preview, line editing, notes, rebuild, import, health, and model-settings controls that mirror the Python UI workflows.
 - Added model storage visibility for Ollama host/root, selected English model sizes, and the Japanese model cache folder.
 - Reworked the local web UI into a responsive two-panel layout with stable scroll regions and resize-friendly controls.

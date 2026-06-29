@@ -28,8 +28,8 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "/api/models" in HTML
     assert "Ollama storage" in HTML
     assert "Preview and line editor" in HTML
-    assert "Model settings" in HTML
-    assert "Import and attach" in HTML
+    assert "Transcription and translation models" in HTML
+    assert "Load existing subtitles" in HTML
     assert "Check setup" in HTML
 
 

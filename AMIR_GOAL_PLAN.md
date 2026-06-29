@@ -3,6 +3,9 @@
 ## Objective
 Make the web UI identify as Fast Multilanguage Transcriber and bring it to practical feature parity with the Python UI by reusing existing service methods.
 
+## Follow-up Objective
+Make the parity UI understandable: dropdown model/settings controls, clearer existing-subtitle import labels, multi-line subtitle selection for scene context, and selected-range retranslate workflow.
+
 ## Constraints
 - Preserve: existing worker/service behavior, model config, queue layout, Subtitle Edit integration, tests.
 - Do not change: core transcription/rebuild algorithms unless web parity needs a service wrapper.
@@ -38,6 +41,8 @@ Make the web UI identify as Fast Multilanguage Transcriber and bring it to pract
 - Stage 2 attempt 1: Chosen route is shared `WorkerService`, not duplicate web worker logic.
 - Stages 2-5 attempt 1: Added service-backed web endpoints and React panels for queue, jobs, preview/editor, notes/rebuilds, models, settings, imports, health. API smoke passed. Desktop/mobile screenshots inspected; no overflow/clipping.
 - Stage 6 attempt 1: `pytest` passed, changes committed and pushed.
+- Follow-up stage active: replacing raw settings/import controls with guided controls and range selection.
+- Follow-up stage passed: dropdown model/settings controls, path picker buttons, clearer existing-subtitle wording, multi-line subtitle selection, selected-range context/retranslation controls, tests, desktop/mobile screenshots.
 
 ## Blockers
 | Stage | Blocker | Evidence | Tried | What would unblock |

@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .app import build_service
+from .asr_models import ranked_asr_candidates
 from .config import CachePaths, ModelConfig, load_config, save_config
 from .domain import SceneContextBlock
 from .integrations import OllamaClient
@@ -207,6 +208,8 @@ HTML = r"""<!doctype html>
       white-space: normal;
     }
     .job-row.active, .preview-row.active { border-color: var(--accent); }
+    .preview-row.selected { background: rgba(255,216,77,.12); border-color: rgba(255,216,77,.55); }
+    .section-note { color: var(--muted); margin: 0; }
     textarea {
       min-height: 90px;
       border: 1px solid var(--line);
@@ -219,6 +222,7 @@ HTML = r"""<!doctype html>
     }
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .tiny { color: var(--muted); font-size: 12px; }
+    .guided-grid { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
     progress { width: 100%; height: 18px; accent-color: var(--accent); margin-top: 14px; }
     pre {
       white-space: pre-wrap;
@@ -254,10 +258,11 @@ HTML = r"""<!doctype html>
       main { padding: 12px; }
       .controls { grid-template-columns: 1fr; }
       .control-span-12, .control-span-6, .control-span-4, .control-span-3 { grid-column: 1; }
-      .button-row button, .button-row select { flex: 1 1 150px; }
+    .button-row button, .button-row select { flex: 1 1 150px; }
       .status-grid { grid-template-columns: 1fr; }
       .model-row { grid-template-columns: 1fr; gap: 4px; }
       .two-col { grid-template-columns: 1fr; }
+      .guided-grid { grid-template-columns: 1fr; }
       pre { min-height: 180px; }
     }
   </style>
@@ -275,6 +280,19 @@ HTML = r"""<!doctype html>
       if (!r.ok) throw new Error(data.error || r.statusText);
       return data;
     });
+    const formatClock = seconds => {
+      const total = Math.max(0, Math.floor(Number(seconds) || 0));
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      return [h, m, s].map(v => String(v).padStart(2, "0")).join(":");
+    };
+    const timeToSeconds = value => {
+      const parts = String(value || "").split(":").map(Number);
+      if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+      if (parts.length === 2) return parts[0] * 60 + parts[1];
+      return Number(value) || 0;
+    };
 
     function App() {
       const [targets, setTargets] = React.useState([]);
@@ -289,6 +307,7 @@ HTML = r"""<!doctype html>
       const [selectedJobId, setSelectedJobId] = React.useState("");
       const [job, setJob] = React.useState(null);
       const [line, setLine] = React.useState(null);
+      const [selectedCueIndexes, setSelectedCueIndexes] = React.useState([]);
       const [batchLabel, setBatchLabel] = React.useState("");
       const [context, setContext] = React.useState("");
       const [noteStart, setNoteStart] = React.useState("");
@@ -298,6 +317,7 @@ HTML = r"""<!doctype html>
       const [importDraft, setImportDraft] = React.useState({video:"", primary_subtitle:"", japanese:"", direct:"", easy:"", reference:""});
       const [settingsDraft, setSettingsDraft] = React.useState(null);
       const [health, setHealth] = React.useState(null);
+      const currentSettings = settingsDraft || status.settings || {};
 
       const refresh = () => api("/api/status").then(data => { setStatus(data); if (!settingsDraft) setSettingsDraft(data.settings); }).catch(err => setError(err.message));
       const refreshModels = () => api("/api/models").then(setModels).catch(err => setError(err.message));
@@ -312,6 +332,8 @@ HTML = r"""<!doctype html>
           setNotes(manifest.scene_contexts || []);
           setIncludeAdapted(manifest.include_adapted_english !== false);
           setPreferFast(Boolean(manifest.prefer_fast_translation));
+          setSelectedCueIndexes([]);
+          setLine(null);
         }).catch(err => setError(err.message));
       }, [selectedJobId]);
 
@@ -329,7 +351,7 @@ HTML = r"""<!doctype html>
       const enqueueOnly = () => post("/api/enqueue", {targets, profile, recursive, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast, batch_label:batchLabel, context, scene_contexts:notes});
       const addNote = () => {
         if (!noteStart || !noteEnd || !noteText.trim()) return;
-        setNotes(current => current.concat({start_seconds:Number(noteStart), end_seconds:Number(noteEnd), notes:noteText.trim()}));
+        setNotes(current => current.concat({start_seconds:timeToSeconds(noteStart), end_seconds:timeToSeconds(noteEnd), notes:noteText.trim()}));
         setNoteStart(""); setNoteEnd(""); setNoteText("");
       };
       const saveNotes = () => selectedJobId && post("/api/job/notes", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
@@ -343,6 +365,34 @@ HTML = r"""<!doctype html>
       }, () => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob));
       const importExisting = () => post("/api/import-existing", {profile, ...importDraft, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
       const saveSettings = () => settingsDraft && post("/api/settings/save", settingsDraft, data => setSettingsDraft(data));
+      const chooseSubtitle = key => api("/api/pick-subtitle").then(d => d.path && setImportDraft(current => ({...current, [key]:d.path}))).catch(err => setError(err.message));
+      const chooseCacheFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, cache_paths:{...current.cache_paths, hf_hub_cache:d.path}}))).catch(err => setError(err.message));
+      const chooseAsrFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, models:{...current.models, asr:d.path}}))).catch(err => setError(err.message));
+      const selectedPreviewRows = () => (job?.preview || []).filter(row => selectedCueIndexes.includes(row.cue_index));
+      const setRangeFromSelection = () => {
+        const rows = selectedPreviewRows();
+        if (!rows.length) return;
+        setNoteStart(formatClock(Math.min(...rows.map(row => Number(row.start)))));
+        setNoteEnd(formatClock(Math.max(...rows.map(row => Number(row.end)))));
+      };
+      const addContextForSelection = () => {
+        setRangeFromSelection();
+        if (!noteText.trim()) setNoteText("Scene context for selected subtitle lines.");
+      };
+      const toggleCue = (row, ev) => {
+        if (ev.shiftKey || ev.ctrlKey || ev.metaKey) {
+          setSelectedCueIndexes(current => current.includes(row.cue_index) ? current.filter(value => value !== row.cue_index) : current.concat(row.cue_index));
+        } else {
+          setSelectedCueIndexes([row.cue_index]);
+        }
+        setLine({...row});
+      };
+      const redoSelectedRange = () => {
+        const rows = selectedPreviewRows();
+        const start = rows.length ? formatClock(Math.min(...rows.map(row => Number(row.start)))) : noteStart;
+        const end = rows.length ? formatClock(Math.max(...rows.map(row => Number(row.end)))) : noteEnd;
+        return post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, start_timecode:start, end_timecode:end, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
+      };
       const jobs = status.jobs || [];
       const selectedRow = jobs.find(row => row.job_id === selectedJobId);
 
@@ -431,7 +481,8 @@ HTML = r"""<!doctype html>
             e("section", {className:"panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Preview and line editor"), e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob)}, "Reload")),
               e("div", {className:"panel-body stack"},
-                e("div", {className:"preview-list"}, job && job.preview && job.preview.length ? job.preview.map(row => e("button", {key:row.cue_index, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""}`, onClick:()=>setLine({...row})},
+                e("p", {className:"section-note"}, "Click one line to edit it. Ctrl-click or Shift-click several lines, then add scene context or rerun only that range."),
+                e("div", {className:"preview-list"}, job && job.preview && job.preview.length ? job.preview.map(row => e("button", {key:row.cue_index, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""} ${selectedCueIndexes.includes(row.cue_index)?"selected":""}`, onClick:ev=>toggleCue(row, ev)},
                   e("strong", null, `#${row.cue_index} ${row.start}s-${row.end}s`),
                   e("span", null, row.japanese || row.literal_english || row.adapted_english || row.reference || "")
                 )) : e("div", {className:"empty"}, "No subtitle lines loaded.")),
@@ -445,17 +496,22 @@ HTML = r"""<!doctype html>
               )
             ),
             e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Notes and rebuilds"), e("span", null, status.rebuild_running ? "Running" : "Idle")),
+              e("div", {className:"panel-head"}, e("strong", null, "Translation context and rerun"), e("span", null, selectedCueIndexes.length ? `${selectedCueIndexes.length} line(s)` : (status.rebuild_running ? "Running" : "Idle"))),
               e("div", {className:"panel-body stack"},
+                e("p", {className:"section-note"}, "Overall context applies to the whole video. Scene notes apply only to the time range below, useful when a few subtitle lines need better translation."),
                 e("input", {value:batchLabel, onChange:ev=>setBatchLabel(ev.target.value), placeholder:"Batch label"}),
-                e("textarea", {value:context, onChange:ev=>setContext(ev.target.value), placeholder:"Overall context"}),
-                e("div", {className:"two-col"}, e("input", {value:noteStart, onChange:ev=>setNoteStart(ev.target.value), placeholder:"Start seconds"}), e("input", {value:noteEnd, onChange:ev=>setNoteEnd(ev.target.value), placeholder:"End seconds"})),
-                e("textarea", {value:noteText, onChange:ev=>setNoteText(ev.target.value), placeholder:"Scene note"}),
+                e("textarea", {value:context, onChange:ev=>setContext(ev.target.value), placeholder:"Overall scene context, character names, tone, slang, relationship details"}),
+                e("div", {className:"button-row"},
+                  e("button", {className:"secondary", disabled:!selectedCueIndexes.length, onClick:setRangeFromSelection}, "Use selected line times"),
+                  e("button", {className:"secondary", disabled:!selectedCueIndexes.length, onClick:addContextForSelection}, "Context for selection")
+                ),
+                e("div", {className:"two-col"}, e("input", {value:noteStart, onChange:ev=>setNoteStart(ev.target.value), placeholder:"Start time, e.g. 00:12:04"}), e("input", {value:noteEnd, onChange:ev=>setNoteEnd(ev.target.value), placeholder:"End time, e.g. 00:12:22"})),
+                e("textarea", {value:noteText, onChange:ev=>setNoteText(ev.target.value), placeholder:"What these selected lines are about, who is speaking, intended meaning"}),
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", onClick:addNote}, "Add note"),
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:saveNotes}, "Save notes"),
-                  e("button", {disabled:!selectedJobId, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Redo English"),
-                  e("button", {disabled:!selectedJobId || !noteStart || !noteEnd, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, start_timecode:noteStart, end_timecode:noteEnd, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Redo range")
+                  e("button", {disabled:!selectedJobId, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Retranslate whole job"),
+                  e("button", {disabled:!selectedJobId || (!selectedCueIndexes.length && (!noteStart || !noteEnd)), onClick:redoSelectedRange}, "Retranslate selected lines")
                 ),
                 e("div", {className:"note-list"}, notes.map((item, index) => e("div", {className:"note-row", key:index}, e("strong", null, `${item.start_seconds}-${item.end_seconds}`), e("span", null, item.notes))))
               )
@@ -469,10 +525,52 @@ HTML = r"""<!doctype html>
               )
             ),
             e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Model settings"), e("span", null, "App-wide")),
+              e("div", {className:"panel-head"}, e("strong", null, "Transcription and translation models"), e("span", null, "App-wide")),
               e("div", {className:"panel-body stack"},
-                settingsDraft ? ["asr_engine","faster_whisper_profile","asr","literal_translation","adapted_translation"].map(key => e("input", {key, value:settingsDraft.models?.[key] || "", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, [key]:ev.target.value}}), placeholder:key})) : null,
-                settingsDraft ? e("input", {value:settingsDraft.cache_paths?.hf_hub_cache || "", onChange:ev=>setSettingsDraft({...settingsDraft, cache_paths:{...settingsDraft.cache_paths, hf_hub_cache:ev.target.value}}), placeholder:"hf_hub_cache"}) : null,
+                e("p", {className:"section-note"}, "Choose Japanese listening model, English translation model, and cache folder. Pickers fill paths for you."),
+                settingsDraft ? e("div", {className:"field"},
+                  e("label", null, "Japanese listening model"),
+                  e("select", {value:settingsDraft.models?.asr || "", onChange:ev => {
+                    const chosen = (currentSettings.asr_options || []).find(item => item.model === ev.target.value);
+                    setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, asr:ev.target.value, asr_engine:chosen?.engine || settingsDraft.models.asr_engine}});
+                  }},
+                    (currentSettings.asr_options || []).map(item => e("option", {key:item.model, value:item.model}, `${item.label} | ${item.model}`))
+                  )
+                ) : null,
+                settingsDraft ? e("div", {className:"guided-grid"},
+                  e("div", {className:"field"},
+                    e("label", null, "Local Japanese model folder"),
+                    e("input", {value:settingsDraft.models?.asr || "", readOnly:true, placeholder:"Use dropdown or pick folder"})
+                  ),
+                  e("button", {className:"secondary", onClick:chooseAsrFolder}, "Pick ASR folder")
+                ) : null,
+                settingsDraft ? e("div", {className:"field"},
+                  e("label", null, "Whisper speed profile"),
+                  e("select", {value:settingsDraft.models?.faster_whisper_profile || "auto", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, faster_whisper_profile:ev.target.value}})},
+                    (currentSettings.faster_whisper_profiles || []).map(item => e("option", {key:item.value, value:item.value}, item.label))
+                  )
+                ) : null,
+                settingsDraft ? e("div", {className:"field"},
+                  e("label", null, "Direct English model"),
+                  e("select", {value:settingsDraft.models?.literal_translation || "", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, literal_translation:ev.target.value}})},
+                    (currentSettings.translation_models || []).map(item => e("option", {key:item, value:item}, item || "Default"))
+                  )
+                ) : null,
+                settingsDraft ? e("div", {className:"field"},
+                  e("label", null, "Natural English model"),
+                  e("select", {value:settingsDraft.models?.adapted_translation || "", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, adapted_translation:ev.target.value}})},
+                    (currentSettings.translation_models || []).map(item => e("option", {key:item, value:item}, item || "Default"))
+                  )
+                ) : null,
+                settingsDraft ? e("div", {className:"guided-grid"},
+                  e("div", {className:"field"},
+                    e("label", null, "Japanese model cache"),
+                    e("select", {value:settingsDraft.cache_paths?.hf_hub_cache || "", onChange:ev=>setSettingsDraft({...settingsDraft, cache_paths:{...settingsDraft.cache_paths, hf_hub_cache:ev.target.value}})},
+                      (currentSettings.cache_options || [""]).map(item => e("option", {key:item || "default", value:item}, item || "Default Hugging Face cache"))
+                    )
+                  ),
+                  e("button", {className:"secondary", onClick:chooseCacheFolder}, "Pick cache folder")
+                ) : null,
                 e("div", {className:"button-row"},
                   e("button", {onClick:saveSettings}, "Save settings"),
                   e("button", {className:"secondary", onClick:()=>post("/api/settings/use-recommended", {}, data=>setSettingsDraft(data))}, "Use Gemma e2b"),
@@ -482,10 +580,35 @@ HTML = r"""<!doctype html>
               )
             ),
             e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Import and attach"), e("button", {className:"secondary", onClick:importExisting}, "Import")),
+              e("div", {className:"panel-head"}, e("strong", null, "Load existing subtitles"), e("button", {className:"secondary", onClick:importExisting}, "Create job from these files")),
               e("div", {className:"panel-body stack"},
-                ["video","primary_subtitle","japanese","direct","easy","reference"].map(key => e("input", {key, value:importDraft[key] || "", onChange:ev=>setImportDraft({...importDraft, [key]:ev.target.value}), placeholder:key})),
-                e("div", {className:"button-row"}, ["ja","direct","easy","reference"].map(role => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[role === "ja" ? "japanese" : role], onClick:()=>post("/api/job/attach", {job_id:selectedJobId, role, path:importDraft[role === "ja" ? "japanese" : role]})}, `Attach ${role}`)))
+                e("p", {className:"section-note"}, "Use this when subtitles already exist. Add a video plus Japanese/English SRT files, or attach one SRT to the selected job."),
+                e("div", {className:"guided-grid"},
+                  e("input", {value:importDraft.video || "", readOnly:true, placeholder:"Video file to link"}),
+                  e("button", {className:"secondary", onClick:()=>api("/api/pick-files").then(d => d.paths?.[0] && setImportDraft({...importDraft, video:d.paths[0]})).catch(err=>setError(err.message))}, "Pick video")
+                ),
+                e("div", {className:"guided-grid"},
+                  e("input", {value:importDraft.japanese || "", readOnly:true, placeholder:"Japanese SRT"}),
+                  e("button", {className:"secondary", onClick:()=>chooseSubtitle("japanese")}, "Pick Japanese")
+                ),
+                e("div", {className:"guided-grid"},
+                  e("input", {value:importDraft.direct || "", readOnly:true, placeholder:"Direct English SRT"}),
+                  e("button", {className:"secondary", onClick:()=>chooseSubtitle("direct")}, "Pick direct")
+                ),
+                e("div", {className:"guided-grid"},
+                  e("input", {value:importDraft.easy || "", readOnly:true, placeholder:"Natural English SRT"}),
+                  e("button", {className:"secondary", onClick:()=>chooseSubtitle("easy")}, "Pick natural")
+                ),
+                e("div", {className:"guided-grid"},
+                  e("input", {value:importDraft.reference || "", readOnly:true, placeholder:"Reference SRT"}),
+                  e("button", {className:"secondary", onClick:()=>chooseSubtitle("reference")}, "Pick reference")
+                ),
+                e("div", {className:"button-row"}, [
+                  ["ja", "japanese", "Attach Japanese"],
+                  ["direct", "direct", "Attach direct English"],
+                  ["easy", "easy", "Attach natural English"],
+                  ["reference", "reference", "Attach reference"]
+                ].map(([role, key, label]) => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[key], onClick:()=>post("/api/job/attach", {job_id:selectedJobId, role, path:importDraft[key]})}, label)))
               )
             ),
             e("section", {className:"panel"},
@@ -666,13 +789,52 @@ class WebServiceState:
 
     def settings(self) -> dict[str, Any]:
         config = self.service.config
+        ollama_models = self._ollama_model_names()
+        asr_options = [
+            {"engine": "kotoba", "model": "kotoba-tech/kotoba-whisper-v2.2", "label": "Kotoba Japanese quality"},
+            {"engine": config.models.asr_engine, "model": config.models.asr, "label": "Current Japanese model"},
+            *[
+                {"engine": item.engine, "model": item.model_id, "label": item.label}
+                for item in ranked_asr_candidates()
+            ],
+            {"engine": "faster-whisper", "model": "large-v3", "label": "Fast local Whisper large-v3"},
+        ]
         return {
             "profiles": sorted(config.profiles),
             "default_profile": config.default_profile,
             "models": asdict(config.models),
             "cache_paths": asdict(config.cache_paths),
             "recommended_translation_model": RECOMMENDED_TRANSLATION_MODEL,
+            "asr_options": _unique_options(asr_options, "model"),
+            "faster_whisper_profiles": [
+                {"value": "auto", "label": "Auto choose best fit"},
+                {"value": "high", "label": "Highest accuracy GPU"},
+                {"value": "balanced", "label": "Balanced GPU"},
+                {"value": "low_gpu", "label": "Low VRAM GPU"},
+                {"value": "cpu_fallback", "label": "CPU fallback"},
+            ],
+            "translation_models": _unique_strings(
+                [
+                    config.models.literal_translation,
+                    config.models.adapted_translation,
+                    RECOMMENDED_TRANSLATION_MODEL,
+                    *ollama_models,
+                ]
+            ),
+            "cache_options": _unique_strings(
+                [
+                    config.cache_paths.hf_hub_cache,
+                    str(Path.cwd() / ".cache" / "whisper-models"),
+                    "",
+                ]
+            ),
         }
+
+    def _ollama_model_names(self) -> list[str]:
+        try:
+            return list(self.service.ollama.list_model_details())
+        except Exception:
+            return []
 
     def job(self, job_id: str) -> dict[str, Any]:
         _job_dir, manifest = self.service.load_job(job_id)
@@ -897,6 +1059,30 @@ def _path_or_none(value: Any) -> Path | None:
     return Path(text).expanduser() if text else None
 
 
+def _unique_strings(values: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _unique_options(values: list[dict[str, str]], key: str) -> list[dict[str, str]]:
+    seen: set[str] = set()
+    result: list[dict[str, str]] = []
+    for item in values:
+        text = item.get(key, "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(item)
+    return result
+
+
 def format_bytes(value: int) -> str:
     size = float(value)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -987,6 +1173,28 @@ def pick_files() -> list[str]:
     )
 
 
+def pick_subtitle_file() -> str:
+    paths = _run_windows_picker(
+        """
+        Add-Type -AssemblyName System.Windows.Forms
+        $owner = New-Object System.Windows.Forms.Form
+        $owner.TopMost = $true
+        $owner.WindowState = 'Minimized'
+        $owner.ShowInTaskbar = $false
+        $owner.Show() | Out-Null
+        $dialog = New-Object System.Windows.Forms.OpenFileDialog
+        $dialog.Title = 'Select subtitle file'
+        $dialog.Multiselect = $false
+        $dialog.Filter = 'SRT subtitle files|*.srt|All files|*.*'
+        if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+            [Console]::Out.WriteLine($dialog.FileName)
+        }
+        $owner.Dispose()
+        """
+    )
+    return paths[0] if paths else ""
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         path = urlparse(self.path).path
@@ -1005,6 +1213,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"path": pick_folder()})
         elif path == "/api/pick-files":
             self._send_json({"paths": pick_files()})
+        elif path == "/api/pick-subtitle":
+            self._send_json({"path": pick_subtitle_file()})
         else:
             self.send_error(404)
 
