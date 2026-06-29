@@ -516,7 +516,7 @@ HTML = r"""<!doctype html>
       const [health, setHealth] = React.useState(null);
       const currentSettings = settingsDraft || status.settings || {};
 
-      const refresh = () => api("/api/status").then(data => { setStatus(data); if (!settingsDraft) setSettingsDraft(data.settings); }).catch(err => setError(err.message));
+      const refresh = () => api("/api/status").then(data => { setStatus(data); setSettingsDraft(current => current || data.settings); }).catch(err => setError(err.message));
       const refreshModels = () => api("/api/models").then(setModels).catch(err => setError(err.message));
       React.useEffect(() => { refresh(); refreshModels(); const id = setInterval(refresh, 1500); return () => clearInterval(id); }, []);
       React.useEffect(() => {

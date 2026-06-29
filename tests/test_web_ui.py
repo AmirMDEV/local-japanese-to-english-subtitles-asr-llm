@@ -97,6 +97,7 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Delete job from list" in HTML
     assert "/api/job/delete" in HTML
     assert "selectNewJob" in HTML
+    assert "setSettingsDraft(current => current || data.settings)" in HTML
 
 
 def test_web_ui_formats_model_sizes() -> None:

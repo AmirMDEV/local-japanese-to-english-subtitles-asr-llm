@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Fixed web model settings polling so changing the Japanese listening model to Qwen3-ASR no longer jumps back to the saved Kotoba value before Save settings.
 - Clarified the preview line editor boxes with visible labels and short explanations for Japanese source subtitles, direct English translation, context-applied English, and reference subtitles.
 - Added an optional second-pass coherence review for context-applied English subtitles, using saved overall/time-range context plus neighboring subtitle context and showing before/after changed lines in the web UI.
 - Fixed Qwen3-ASR 1.7B long-sample coverage by using 30-second Qwen chunks and more generation headroom; live DANDY 90s proof now reaches 91.78s with monotonic forced-aligned cues.
