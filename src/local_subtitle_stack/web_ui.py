@@ -155,14 +155,45 @@ HTML = r"""<!doctype html>
     }
     .panel-head {
       display: flex;
+      flex-wrap: wrap;
       justify-content: space-between;
       gap: 12px;
-      align-items: center;
+      align-items: flex-start;
       padding: 14px 16px;
       border-bottom: 1px solid var(--line);
       background: rgba(255,255,255,.03);
     }
     .panel-head strong { font-size: 15px; }
+    .panel.collapsed .panel-head { border-bottom: 0; }
+    .panel-toggle {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      background: transparent;
+      color: var(--text);
+      flex: 1 1 220px;
+      text-align: left;
+      box-shadow: none;
+    }
+    .panel-toggle strong { overflow-wrap: anywhere; }
+    .panel-toggle:hover { background: transparent; }
+    .panel-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+    .panel-toggle-icon {
+      display: inline-grid;
+      place-items: center;
+      width: 22px;
+      height: 22px;
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--accent);
+      font-weight: 900;
+      line-height: 1;
+    }
+    .panel-head-action { flex: 0 1 auto; margin-left: auto; }
     .panel-body { padding: 16px; }
     .controls {
       display: grid;
@@ -598,13 +629,30 @@ HTML = r"""<!doctype html>
       const [settingsDraft, setSettingsDraft] = React.useState(null);
       const [settingsSaving, setSettingsSaving] = React.useState(false);
       const [health, setHealth] = React.useState(null);
+      const [collapsedPanels, setCollapsedPanels] = React.useState(() => {
+        try { return JSON.parse(localStorage.getItem("fmt.collapsedPanels.v1") || "{}"); }
+        catch (_err) { return {}; }
+      });
       const currentSettings = settingsDraft || status.settings || {};
       const sameJson = (left, right) => JSON.stringify(left || {}) === JSON.stringify(right || {});
       const settingsDirty = Boolean(settingsDraft && status.settings && (!sameJson(settingsDraft.models, status.settings.models) || !sameJson(settingsDraft.cache_paths, status.settings.cache_paths)));
+      const isCollapsed = key => Boolean(collapsedPanels[key]);
+      const togglePanel = key => setCollapsedPanels(current => ({...current, [key]:!current[key]}));
+      const panel = (key, className, title, action, bodyClass, ...body) => e("section", {className:`panel ${className || ""} ${isCollapsed(key) ? "collapsed" : ""}`.trim(), "data-panel-key":key},
+        e("div", {className:"panel-head"},
+          e("button", {type:"button", className:"panel-toggle", "aria-expanded":!isCollapsed(key), onClick:()=>togglePanel(key)},
+            e("span", {className:"panel-toggle-icon", "aria-hidden":"true"}, isCollapsed(key) ? "+" : "-"),
+            e("strong", null, title)
+          ),
+          action ? e("div", {className:"panel-head-action"}, action) : null
+        ),
+        isCollapsed(key) ? null : e("div", {className:bodyClass}, ...body)
+      );
 
       const refresh = () => api("/api/status").then(data => { setStatus(data); setSettingsDraft(current => current || data.settings); }).catch(err => setError(err.message));
       const refreshModels = () => api("/api/models").then(setModels).catch(err => setError(err.message));
       React.useEffect(() => { refresh(); refreshModels(); const id = setInterval(refresh, 1500); return () => clearInterval(id); }, []);
+      React.useEffect(() => { localStorage.setItem("fmt.collapsedPanels.v1", JSON.stringify(collapsedPanels)); }, [collapsedPanels]);
       React.useEffect(() => {
         const currentJobs = status.jobs || [];
         if (currentJobs.length && (!selectedJobId || !currentJobs.some(row => row.job_id === selectedJobId))) {
@@ -866,9 +914,7 @@ HTML = r"""<!doctype html>
         ["5", "Review", "Open subtitle lines, edit text, or add context to selected lines."],
         ["6", "Export", "Open saved subtitles or Subtitle Edit."]
       ];
-      const subtitleImportPanel = e("section", {className:"panel"},
-        e("div", {className:"panel-head"}, e("strong", null, "Load subtitle files into preview"), e("button", {className:"secondary", onClick:importExisting}, "Create preview job")),
-        e("div", {className:"panel-body stack"},
+      const subtitleImportPanel = panel("subtitle-import", "", "Load subtitle files into preview", e("button", {className:"secondary", onClick:importExisting}, "Create preview job"), "panel-body stack",
           e("p", {className:"section-note"}, "Use this when you already have SRT files. Create a preview job from them, or attach one SRT to the selected job so it appears in Preview and line editor. After loading, select lines there and add time-range context to retranslate only that part."),
           e("div", {className:"guided-grid"},
             e("input", {value:importDraft.video || "", readOnly:true, placeholder:"Video file to link"}),
@@ -896,11 +942,8 @@ HTML = r"""<!doctype html>
             ["easy", "easy", "Attach context-applied English to preview"],
             ["reference", "reference", "Attach reference to preview"]
           ].map(([role, key, label]) => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[key], onClick:()=>attachSubtitle(role, key)}, label)))
-        )
       );
-      const jobsPanel = e("section", {className:"panel jobs-panel"},
-        e("div", {className:"panel-head"}, e("strong", null, "Jobs"), e("span", null, status.worker_running ? "Running" : (status.pause_requested ? "Stopping" : "Idle"))),
-        e("div", {className:"panel-body stack"},
+      const jobsPanel = panel("jobs", "jobs-panel", "Jobs", e("span", null, status.worker_running ? "Running" : (status.pause_requested ? "Stopping" : "Idle")), "panel-body stack",
           e("div", {className:"job-list"},
             jobs.length ? jobs.map(row => e("div", {key:row.job_id, className:`job-card ${row.job_id===selectedJobId?"active":""}`},
               e("button", {className:"job-row", onClick:()=>setSelectedJobId(row.job_id)},
@@ -915,7 +958,6 @@ HTML = r"""<!doctype html>
             e("button", {className:"secondary", disabled:!jobs.some(row => ["completed", "failed", "paused"].includes(row.status)), onClick:()=>clearJobs("finished")}, "Clear finished jobs"),
             e("button", {className:"danger", disabled:!jobs.some(row => row.status !== "working"), onClick:()=>clearJobs("all")}, "Clear all non-running jobs")
           )
-        )
       );
 
       return e(React.Fragment, null,
@@ -935,9 +977,7 @@ HTML = r"""<!doctype html>
         ),
         e("div", {className:"layout"},
           e("div", {className:"stack"},
-            e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Queue inputs"), e("span", null, `${targets.length} selected`)),
-              e("div", {className:"panel-body stack"},
+            panel("queue-inputs", "", "Queue inputs", e("span", null, `${targets.length} selected`), "panel-body stack",
                 e("div", {className:"controls"},
                   e("div", {className:"field control-span-12"},
                     e("label", null, "Manual path"),
@@ -973,16 +1013,13 @@ HTML = r"""<!doctype html>
                 targets.length
                   ? e("div", {className:"target-list"}, targets.map((path, index) => e("div", {className:"item", key:path}, e("span", null, `Source ${index + 1}`), e("span", {className:"path"}, path))))
                   : e("div", {className:"empty"}, "Select a folder, select files, or paste a path.")
-              )
             ),
             subtitleImportPanel,
-            error ? e("section", {className:"panel error"}, e("div", {className:"panel-head"}, e("strong", null, "Error")), e("div", {className:"panel-body"}, e("p", null, error))) : null
+            error ? panel("error", "error", "Error", null, "panel-body", e("p", null, error)) : null
           ),
           e("div", {className:"stack review-stack"},
             jobsPanel,
-            e("section", {className:"panel selected-job-panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Selected job"), e("span", null, selectedRow ? selectedRow.status : "None")),
-              e("div", {className:"panel-body stack"},
+            panel("selected-job", "selected-job-panel", "Selected job", e("span", null, selectedRow ? selectedRow.status : "None"), "panel-body stack",
                 e("div", {className:"review-box"}, e("strong", null, "What to do now"), e("p", null, reviewHint(selectedRow))),
                 selectedRow ? e("div", {className:"status-grid"},
                   e("div", {className:"metric"}, e("span", null, "Current step"), e("strong", null, selectedStageLabel(selectedRow))),
@@ -1003,11 +1040,8 @@ HTML = r"""<!doctype html>
                     outputButtons.map(([kind, label]) => e("button", {key:kind, className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:kind})}, label))
                   )
                 )
-              )
             ),
-            e("section", {className:"panel preview-editor-panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Preview and line editor"), e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob)}, "Reload")),
-              e("div", {className:"panel-body stack"},
+            panel("preview-editor", "preview-editor-panel", "Preview and line editor", e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob)}, "Reload"), "panel-body stack",
                 e("p", {className:"section-note"}, "Click a line to edit it. Ctrl-click adds separate lines. Shift-click selects a continuous range and fills the time-range context below."),
                 e("div", {className:"field"},
                   e("label", null, "Time display"),
@@ -1063,11 +1097,8 @@ HTML = r"""<!doctype html>
                   ),
                   e("button", {onClick:saveLine}, "Save line")
                 ) : null
-              )
             ),
-            e("section", {className:"panel context-panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Overall video context"), e("span", null, status.rebuild_running ? "Running" : "Idle")),
-              e("div", {className:"panel-body stack"},
+            panel("context", "context-panel", "Overall video context", e("span", null, status.rebuild_running ? "Running" : "Idle"), "panel-body stack",
                 e("p", {className:"section-note"}, "This text is added to every English translation prompt after the Japanese audio has been transcribed. Use it for names, relationships, tone, slang, and story so far."),
                 e("input", {value:batchLabel, onChange:ev=>setBatchLabel(ev.target.value), placeholder:"Series or project name, e.g. MARA-018 or Show title"}),
                 e("textarea", {value:context, onChange:ev=>setContext(ev.target.value), placeholder:"Overall video context used in every translation prompt: character names, relationships, tone, slang, setting, story so far"}),
@@ -1076,11 +1107,8 @@ HTML = r"""<!doctype html>
                   e("button", {disabled:!selectedJobId, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Retranslate whole job with context"),
                   e("button", {disabled:!selectedJobId || !includeAdapted, onClick:runCoherencePass}, "Run second-pass coherence review")
                 )
-              )
             ),
-            e("section", {className:"panel second-pass-panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Second-pass changes"), e("span", null, status.rebuild_running ? "Running" : `${(job?.coherence_review || []).length} changes`)),
-              e("div", {className:"panel-body stack"},
+            panel("second-pass", "second-pass-panel", "Second-pass changes", e("span", null, status.rebuild_running ? "Running" : `${(job?.coherence_review || []).length} changes`), "panel-body stack",
                 e("p", {className:"section-note"}, "After second-pass coherence review, changed context-applied English lines appear here. Click a change to select that subtitle line. Restore before puts that one line back."),
                 status.rebuild_running && selectedRow ? progressPanel(selectedRow, "Second-pass coherence review progress") : null,
                 job?.coherence_review?.length ? e("div", {className:"change-list"}, job.coherence_review.map(change => e("div", {key:change.cue_index, className:"change-row", role:"button", tabIndex:0, onClick:()=>selectCoherenceChange(change), onKeyDown:ev=>{ if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectCoherenceChange(change); } }},
@@ -1092,11 +1120,8 @@ HTML = r"""<!doctype html>
                     restoreStatus[change.cue_index] && restoreStatus[change.cue_index] !== "Restoring..." ? e("span", {className:"tiny"}, restoreStatus[change.cue_index]) : null
                   )
                 ))) : e("div", {className:"empty"}, "No second-pass changes yet.")
-              )
             ),
-            e("section", {className:"panel time-range-panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Time-range context"), e("span", null, selectedCueIndexes.length ? `${selectedCueIndexes.length} selected` : "Select subtitle lines")),
-              e("div", {className:"panel-body stack"},
+            panel("time-range", "time-range-panel", "Time-range context", e("span", null, selectedCueIndexes.length ? `${selectedCueIndexes.length} selected` : "Select subtitle lines"), "panel-body stack",
                 e("p", {className:"section-note"}, "Select subtitle lines in the preview. Start and end times fill automatically. Add as many context ranges as needed, then retranslate the selected time range or save them for the full job."),
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", disabled:!selectedCueIndexes.length, onClick:setRangeFromSelection}, "Fill times from selected lines"),
@@ -1121,11 +1146,8 @@ HTML = r"""<!doctype html>
                   ),
                   e("textarea", {value:item.notes || "", onChange:ev=>updateNote(index, {notes:ev.target.value}), placeholder:"Context for this range"})
                 )) : e("div", {className:"empty"}, "No time-range context yet. Select subtitle lines above, add context, then save."))
-              )
             ),
-            e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Models"), e("button", {className:"secondary", onClick:refreshModels}, "Refresh")),
-              e("div", {className:"panel-body model-list"},
+            panel("models", "", "Models", e("button", {className:"secondary", onClick:refreshModels}, "Refresh"), "panel-body model-list",
                 e("div", {className:"model-row"}, e("span", null, "Ollama storage"), e("span", {className:"path"}, models.storage || "Unknown"), e("span", null, "")),
                 (models.selected || []).map(item => e("div", {className:"model-detail-row", key:item.label},
                   e("div", {className:"model-detail-head"},
@@ -1144,11 +1166,8 @@ HTML = r"""<!doctype html>
                   )
                 )),
                 e("div", {className:"model-row"}, e("span", null, "Japanese cache"), e("span", {className:"path"}, models.hf_cache || "Default Hugging Face cache"), e("span", null, ""))
-              )
             ),
-            e("section", {className:"panel model-settings-panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Transcription and translation models"), e("span", {className:settingsSaving || settingsDirty ? "dirty-pill" : ""}, settingsSaving ? "Saving" : (settingsDirty ? "Auto-saving" : "App-wide"))),
-              e("div", {className:"panel-body stack"},
+            panel("model-settings", "model-settings-panel", "Transcription and translation models", e("span", {className:settingsSaving || settingsDirty ? "dirty-pill" : ""}, settingsSaving ? "Saving" : (settingsDirty ? "Auto-saving" : "App-wide")), "panel-body stack",
                 e("p", {className:"section-note"}, "Choose the Japanese listening model and English translation models before adding jobs. These settings apply to every new job."),
                 settingsDraft ? e("div", {className:"field"},
                   e("label", null, "Japanese listening model"),
@@ -1197,14 +1216,11 @@ HTML = r"""<!doctype html>
                 e("div", {className:"button-row"},
                   e("button", {className:"danger", onClick:()=>post("/api/settings/reset", {}, applySettings)}, "Defaults")
                 )
-              )
             ),
-            e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Health"), e("button", {className:"secondary", onClick:()=>api("/api/health").then(setHealth).catch(err=>setError(err.message))}, "Check setup")),
+            panel("health", "", "Health", e("button", {className:"secondary", onClick:()=>api("/api/health").then(setHealth).catch(err=>setError(err.message))}, "Check setup"), "panel-body",
               e("pre", null, health ? [health.summary, ...(health.checks || []).map(item => `[${item.status}] ${item.name}: ${item.detail}`)].join("\\n") : "Health check output appears here.")
             ),
-            e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Redo log"), e("span", null, status.rebuild_running ? "Live" : "Idle")),
+            panel("redo-log", "", "Redo log", e("span", null, status.rebuild_running ? "Live" : "Idle"), "panel-body",
               e("pre", null, status.rebuild_log || "Redo output appears here.")
             )
           )

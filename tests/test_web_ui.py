@@ -42,6 +42,13 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "review-stack" in HTML
     assert "context-panel" in HTML
     assert "preview-editor-panel" in HTML
+    assert "fmt.collapsedPanels.v1" in HTML
+    assert "panel-toggle" in HTML
+    assert "aria-expanded" in HTML
+    assert "data-panel-key" in HTML
+    assert "flex-wrap: wrap" in HTML
+    assert "flex: 1 1 220px" in HTML
+    assert "overflow-wrap: anywhere" in HTML
     assert "Time display" in HTML
     assert "Seconds, e.g. 62.5s" in HTML
     assert "Hours:minutes:seconds, e.g. 00:01:02.500" in HTML
