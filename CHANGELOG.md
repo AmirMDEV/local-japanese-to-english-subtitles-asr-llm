@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Added live web progress bars for running steps, including second-pass coherence review progress by subtitle group.
 - Added an `X` button beside each web job so individual completed, failed, or paused jobs can be removed directly from the Jobs list.
 - Tightened the web model settings layout so long model names fit better, and removed the redundant `Use Gemma e2b` and `Download Gemma` buttons now that model dropdowns handle selection.
 - Added an `Unsaved changes` indicator to model settings so dropdown changes clearly need Save settings before new jobs use them.

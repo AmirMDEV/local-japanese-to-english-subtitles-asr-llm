@@ -227,6 +227,21 @@ HTML = r"""<!doctype html>
     }
     .metric span { color: var(--muted); display: block; font-size: 12px; }
     .metric strong { display: block; font-size: clamp(20px, 3vw, 32px); margin-top: 2px; }
+    .progress-card {
+      display: grid;
+      gap: 8px;
+      padding: 10px 12px;
+      border: 1px solid rgba(255,216,77,.32);
+      border-radius: 8px;
+      background: rgba(255,216,77,.08);
+    }
+    .progress-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+    .progress-head span { color: var(--muted); font-weight: 700; }
     .model-list { display: grid; gap: 8px; }
     .model-row {
       display: grid;
@@ -522,13 +537,22 @@ HTML = r"""<!doctype html>
       })[stage] || (stage || "Not started");
     const jobStepText = row => {
       if (!row) return "";
+      if (row.stage_progress_message) return row.step_text || row.stage_progress_message;
       if (row.status === "completed" && row.stage === "finalize") return "Saved subtitle files";
       return row.step_text || "";
     };
     const selectedStageLabel = row => {
+      if (row?.progress_stage) return stageLabel(row.progress_stage);
       if (row?.status === "completed" && row?.stage === "finalize") return "Saved subtitle files";
       return stageLabel(row?.stage);
     };
+    const progressPercent = row => Math.max(0, Math.min(100, Number(row?.stage_progress_percent || row?.overall_progress_percent || 0)));
+    const hasLiveProgress = row => Boolean(row && row.stage_progress_message);
+    const progressPanel = (row, label) => row ? e("div", {className:"progress-card"},
+      e("div", {className:"progress-head"}, e("strong", null, label), e("span", null, `${progressPercent(row).toFixed(0)}%`)),
+      e("progress", {max:"100", value:progressPercent(row), "aria-label":label}),
+      e("p", {className:"tiny"}, row.stage_progress_message || row.step_text || selectedStageLabel(row))
+    ) : null;
     const reviewHint = row => {
       if (!row) return "Start at Step 1: choose videos or an existing subtitle file.";
       if (row.status === "completed") return "Review output now: open the subtitle lines below, edit any bad line, or open the saved files.";
@@ -896,6 +920,7 @@ HTML = r"""<!doctype html>
                   e("div", {className:"metric"}, e("span", null, "Progress"), e("strong", null, `${selectedRow.overall_progress_percent || 0}%`)),
                   e("div", {className:"metric"}, e("span", null, "Model in use"), e("strong", null, modelText))
                 ) : e("div", {className:"empty"}, "Select a job."),
+                hasLiveProgress(selectedRow) ? progressPanel(selectedRow, "Running step progress") : null,
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/job/retry", {job_id:selectedJobId})}, "Run this job again"),
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"folder"})}, "Open subtitle folder"),
@@ -987,6 +1012,7 @@ HTML = r"""<!doctype html>
               e("div", {className:"panel-head"}, e("strong", null, "Second-pass changes"), e("span", null, status.rebuild_running ? "Running" : `${(job?.coherence_review || []).length} changes`)),
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "After second-pass coherence review, changed context-applied English lines appear here. Click a change to select that subtitle line. Restore before puts that one line back."),
+                status.rebuild_running && selectedRow ? progressPanel(selectedRow, "Second-pass coherence review progress") : null,
                 job?.coherence_review?.length ? e("div", {className:"change-list"}, job.coherence_review.map(change => e("div", {key:change.cue_index, className:"change-row", onClick:()=>setLine((job.preview || []).find(row => row.cue_index === change.cue_index) || line)},
                   e("span", {className:"change-time"}, `#${change.cue_index}\n${formatSecondsDisplay(change.start)} - ${formatSecondsDisplay(change.end)}`),
                   e("span", {className:"change-before"}, change.before),

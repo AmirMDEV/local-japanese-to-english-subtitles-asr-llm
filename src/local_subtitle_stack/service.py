@@ -390,6 +390,7 @@ class WorkerService:
                     "state_dir": state,
                     "status": manifest.status,
                     "stage": manifest.current_stage,
+                    "progress_stage": progress.stage if progress is not None else "",
                     "step_text": "Waiting to start. Press Start processing all jobs." if manifest.status == JOB_STATUS_QUEUED else self._stage_display_text(manifest),
                     "source": manifest.source_name,
                     "updated_at": manifest.updated_at,
@@ -943,17 +944,20 @@ class WorkerService:
         self._save_manifest(job_dir, manifest)
 
     def _current_stage_percent(self, manifest: JobManifest) -> float:
+        progress = manifest.current_progress
+        if progress is not None:
+            return progress.percent
         if manifest.status == JOB_STATUS_COMPLETED:
             return 100.0
-        progress = manifest.current_progress
-        if progress is not None and progress.stage == manifest.current_stage:
-            return progress.percent
         checkpoint = manifest.checkpoint(manifest.current_stage)
         if checkpoint.status == "completed":
             return 100.0
         return 0.0
 
     def _overall_progress_percent(self, manifest: JobManifest) -> float:
+        progress = manifest.current_progress
+        if progress is not None and manifest.status == JOB_STATUS_COMPLETED:
+            return progress.percent
         if manifest.status == JOB_STATUS_COMPLETED:
             return 100.0
         stages = self._active_stages(manifest)
@@ -967,9 +971,10 @@ class WorkerService:
 
     def _stage_display_text(self, manifest: JobManifest) -> str:
         progress = manifest.current_progress
-        base = STAGE_DISPLAY_LABELS.get(manifest.current_stage, manifest.current_stage)
+        display_stage = progress.stage if progress is not None else manifest.current_stage
+        base = STAGE_DISPLAY_LABELS.get(display_stage, display_stage)
         model_name = self._current_model_name(manifest)
-        if progress is None or progress.stage != manifest.current_stage:
+        if progress is None:
             return f"{base} [{model_name}]" if model_name else base
         percent_text = f"{progress.percent:.0f}%"
         eta_text = (
@@ -2457,6 +2462,15 @@ class WorkerService:
         groups = cue_groups(original_adapted, self._effective_group_size(manifest, adapted=True))
         metadata = metadata_from_manifest(manifest.source_name, manifest.series)
         self._append_event(manifest, "info", "Started second-pass subtitle coherence review.", stage=STAGE_ADAPTED)
+        self._set_stage_progress(
+            manifest,
+            stage=STAGE_ADAPTED,
+            current=0.0,
+            total=float(max(len(groups), 1)),
+            unit="groups",
+            message=f"Second-pass group 0 of {len(groups)}",
+        )
+        self._save_progress(job_dir, manifest, force=True)
         for group_index, group in enumerate(groups):
             self._should_pause(job_dir, manifest)
             source_group = [source_by_index.get(cue.index, cue) for cue in group]

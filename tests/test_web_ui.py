@@ -91,6 +91,10 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Add time-range context" in HTML
     assert "Retranslate selected time range" in HTML
     assert "Run second-pass coherence review" in HTML
+    assert "Second-pass coherence review progress" in HTML
+    assert "Running step progress" in HTML
+    assert "stage_progress_message" in HTML
+    assert "progress_stage" in HTML
     assert "Second-pass changes" in HTML
     assert "Restore before" in HTML
     assert "/api/job/coherence-pass" in HTML
