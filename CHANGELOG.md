@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Added drag-and-drop `.srt` import in the web preview editor so existing subtitles can be uploaded into a new job or attached to the selected job.
 - Added a plain-language workflow guide and clearer review buttons so the web UI explains what to do at each stage.
 - Made the web UI more guided: model settings now use dropdowns and picker buttons, existing-subtitle import has clearer labels, and subtitle preview supports multi-line selection for scene context and selected-range retranslation.
 - Renamed the web UI to Fast Multilanguage Transcriber and added queue, job preview, line editing, notes, rebuild, import, health, and model-settings controls that mirror the Python UI workflows.

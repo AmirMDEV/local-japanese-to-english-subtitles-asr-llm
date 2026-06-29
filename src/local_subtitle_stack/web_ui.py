@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -171,6 +172,16 @@ HTML = r"""<!doctype html>
       padding: 18px;
       text-align: center;
     }
+    .drop-zone {
+      border: 1px dashed rgba(255,216,77,.55);
+      border-radius: 8px;
+      background: rgba(255,216,77,.07);
+      color: var(--soft);
+      padding: 18px;
+      text-align: center;
+    }
+    .drop-zone strong { display: block; }
+    .drop-zone span { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
     .status-grid {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -345,6 +356,7 @@ HTML = r"""<!doctype html>
       const [job, setJob] = React.useState(null);
       const [line, setLine] = React.useState(null);
       const [selectedCueIndexes, setSelectedCueIndexes] = React.useState([]);
+      const [dropRole, setDropRole] = React.useState("direct");
       const [batchLabel, setBatchLabel] = React.useState("");
       const [context, setContext] = React.useState("");
       const [noteStart, setNoteStart] = React.useState("");
@@ -429,6 +441,21 @@ HTML = r"""<!doctype html>
         const start = rows.length ? formatClock(Math.min(...rows.map(row => Number(row.start)))) : noteStart;
         const end = rows.length ? formatClock(Math.max(...rows.map(row => Number(row.end)))) : noteEnd;
         return post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, start_timecode:start, end_timecode:end, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
+      };
+      const dropSubtitle = async ev => {
+        ev.preventDefault();
+        setError("");
+        const file = [...(ev.dataTransfer?.files || [])].find(item => item.name.toLowerCase().endsWith(".srt"));
+        if (!file) { setError("Drop an .srt subtitle file."); return; }
+        const data = await post("/api/upload-subtitle", {
+          filename:file.name,
+          content:await file.text(),
+          role:dropRole,
+          job_id:selectedJobId,
+          profile
+        }, null);
+        if (data?.job_id) setSelectedJobId(data.job_id);
+        await refresh();
       };
       const jobs = status.jobs || [];
       const selectedRow = jobs.find(row => row.job_id === selectedJobId);
@@ -543,10 +570,19 @@ HTML = r"""<!doctype html>
               e("div", {className:"panel-head"}, e("strong", null, "Preview and line editor"), e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob)}, "Reload")),
               e("div", {className:"panel-body stack"},
                 e("p", {className:"section-note"}, "Click one line to edit it. Ctrl-click or Shift-click several lines, then add scene context or rerun only that range."),
+                e("div", {className:"field"},
+                  e("label", null, "Dropped subtitle type"),
+                  e("select", {value:dropRole, onChange:ev=>setDropRole(ev.target.value)},
+                    [["direct","Direct English"],["ja","Japanese"],["easy","Natural English"],["reference","Reference"]].map(([value,label]) => e("option", {key:value, value}, label))
+                  )
+                ),
                 e("div", {className:"preview-list"}, job && job.preview && job.preview.length ? job.preview.map(row => e("button", {key:row.cue_index, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""} ${selectedCueIndexes.includes(row.cue_index)?"selected":""}`, onClick:ev=>toggleCue(row, ev)},
                   e("strong", null, `#${row.cue_index} ${row.start}s-${row.end}s`),
                   e("span", null, row.japanese || row.literal_english || row.adapted_english || row.reference || "")
-                )) : e("div", {className:"empty"}, "No subtitle lines loaded.")),
+                )) : e("div", {className:"drop-zone", onDragOver:ev=>ev.preventDefault(), onDrop:dropSubtitle},
+                  e("strong", null, "Drop an .srt file here to edit existing subtitles"),
+                  e("span", null, selectedJobId ? "Dropped file attaches to the selected job." : "Dropped direct/Japanese subtitles create a new editable job.")
+                )),
                 line ? e("div", {className:"stack"},
                   e("textarea", {value:line.japanese || "", onChange:ev=>setLine({...line, japanese:ev.target.value}), placeholder:"Japanese"}),
                   e("textarea", {value:line.literal_english || "", onChange:ev=>setLine({...line, literal_english:ev.target.value}), placeholder:"Direct English"}),
@@ -1095,6 +1131,35 @@ class WebServiceState:
         threading.Thread(target=self.service.ollama.pull_model, args=(RECOMMENDED_TRANSLATION_MODEL,), daemon=True).start()
         return {"message": f"Downloading {RECOMMENDED_TRANSLATION_MODEL}"}
 
+    def upload_subtitle(self, payload: dict[str, Any]) -> dict[str, Any]:
+        filename = Path(str(payload.get("filename") or "dropped.srt")).name
+        if not filename.lower().endswith(".srt"):
+            raise QueueError("Drop an .srt subtitle file.")
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
+        content = str(payload.get("content") or "")
+        if not content.strip():
+            raise QueueError("Dropped subtitle file is empty.")
+        upload_dir = self.service.config.queue_root_path / "web-imports"
+        upload_dir.mkdir(parents=True, exist_ok=True)
+        target = upload_dir / safe_name
+        if target.exists():
+            target = upload_dir / f"{Path(safe_name).stem}-{len(list(upload_dir.glob(Path(safe_name).stem + '*')))}.srt"
+        target.write_text(content, encoding="utf-8-sig")
+        role = str(payload.get("role") or "direct")
+        job_id = _optional_str(payload.get("job_id"))
+        if job_id:
+            manifest = self.service.attach_existing_subtitle(job_id, role=role, subtitle_path=target)
+            return {"mode": "attached", "job_id": manifest.job_id, "path": str(target)}
+        if role not in {"ja", "direct"}:
+            raise QueueError("Select an existing job before dropping natural English or reference subtitles.")
+        kwargs = {"primary_subtitle": target, "profile": str(payload.get("profile") or self.service.config.default_profile)}
+        if role == "ja":
+            kwargs["japanese"] = target
+        else:
+            kwargs["direct"] = target
+        manifest = self.service.import_existing(**kwargs)
+        return {"mode": "created", "job_id": manifest.job_id, "path": str(target)}
+
     def _drain_rebuild_log(self) -> None:
         process = self.rebuild_process
         if process is None or process.stdout is None:
@@ -1293,6 +1358,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(APP_STATE.stop_worker())
             elif self.path == "/api/import-existing":
                 self._send_json(APP_STATE.import_existing(payload))
+            elif self.path == "/api/upload-subtitle":
+                self._send_json(APP_STATE.upload_subtitle(payload))
             elif self.path == "/api/worker/start":
                 self._send_json(APP_STATE.start_worker())
             elif self.path == "/api/worker/stop":
