@@ -117,7 +117,7 @@ HTML = r"""<!doctype html>
     p { color: var(--muted); line-height: 1.5; margin: 6px 0 0; }
     .layout {
       display: grid;
-      grid-template-columns: minmax(360px, .9fr) minmax(420px, 1.35fr);
+      grid-template-columns: minmax(300px, .65fr) minmax(720px, 1.65fr);
       gap: 14px;
       align-items: start;
     }
@@ -238,7 +238,7 @@ HTML = r"""<!doctype html>
     }
     .model-locations span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .job-list, .preview-list, .note-list { display: grid; gap: 8px; max-height: min(42vh, 480px); overflow: auto; }
-    .preview-list { max-height: min(58vh, 680px); }
+    .preview-list { align-content: start; max-height: min(58vh, 680px); }
     .job-row, .preview-row, .note-row {
       width: 100%;
       text-align: left;
@@ -246,27 +246,56 @@ HTML = r"""<!doctype html>
       gap: 4px;
       background: rgba(0,0,0,.14);
       color: var(--soft);
-      border-color: rgba(255,255,255,.08);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 6px;
       white-space: normal;
     }
     .job-row.active, .preview-row.active { border-color: var(--accent); }
     .preview-row.selected { background: rgba(255,216,77,.12); border-color: rgba(255,216,77,.55); }
-    .preview-row {
-      grid-template-columns: 136px minmax(0, 1fr);
+    .preview-header, .preview-row {
+      grid-template-columns: 112px minmax(0, 1fr) minmax(0, 1.08fr);
       align-items: start;
-      padding: 10px 12px;
     }
+    .preview-header {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      display: grid;
+      gap: 8px;
+      padding: 8px 12px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 6px;
+      background: #11171d;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .preview-row {
+      gap: 8px;
+      padding: 10px 12px;
+      cursor: pointer;
+      height: auto;
+      min-height: max-content;
+      user-select: none;
+    }
+    .preview-row > * { pointer-events: none; }
+    .preview-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .preview-time {
+      display: block;
       color: var(--muted);
       font-family: Consolas, "Cascadia Mono", monospace;
       font-size: 12px;
       line-height: 1.35;
     }
-    .preview-text {
+    .preview-text, .preview-empty {
+      display: block;
+      min-width: 0;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
+      word-break: break-word;
       line-height: 1.45;
     }
+    .preview-empty { color: var(--muted); font-style: italic; }
     .range-card {
       display: grid;
       gap: 8px;
@@ -745,10 +774,18 @@ HTML = r"""<!doctype html>
                     [["direct","Direct English translation"],["ja","Japanese"],["easy","Context-applied English"],["reference","Reference"]].map(([value,label]) => e("option", {key:value, value}, label))
                   )
                 ),
-                e("div", {className:"preview-list"}, job && job.preview && job.preview.length ? job.preview.map(row => e("button", {key:row.cue_index, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""} ${selectedCueIndexes.includes(row.cue_index)?"selected":""}`, onClick:ev=>toggleCue(row, ev)},
-                  e("span", {className:"preview-time"}, `#${row.cue_index}\n${formatPreviewRange(row)}`),
-                  e("span", {className:"preview-text"}, row.japanese || row.literal_english || row.adapted_english || row.reference || "")
-                )) : e("div", {className:"drop-zone", onDragOver:ev=>ev.preventDefault(), onDrop:dropSubtitle},
+                e("div", {className:"preview-list"}, job && job.preview && job.preview.length ? [
+                  e("div", {className:"preview-header", key:"preview-header"},
+                    e("span", null, "Time"),
+                    e("span", null, "Japanese subtitles"),
+                    e("span", null, "Direct English translation")
+                  ),
+                  ...job.preview.map(row => e("div", {key:row.cue_index, role:"button", tabIndex:0, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""} ${selectedCueIndexes.includes(row.cue_index)?"selected":""}`, onClick:ev=>toggleCue(row, ev), onKeyDown:ev=>{ if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); toggleCue(row, ev); } }},
+                    e("span", {className:"preview-time"}, `#${row.cue_index}\n${formatPreviewRange(row)}`),
+                    e("span", {className:row.japanese ? "preview-text" : "preview-empty"}, row.japanese || "No Japanese loaded"),
+                    e("span", {className:row.literal_english ? "preview-text" : "preview-empty"}, row.literal_english || "No direct English loaded")
+                  ))
+                ] : e("div", {className:"drop-zone", onDragOver:ev=>ev.preventDefault(), onDrop:dropSubtitle},
                   e("strong", null, "Drop an .srt file here to edit existing subtitles"),
                   e("span", null, selectedJobId ? "Dropped file attaches to the selected job." : "Dropped direct English translation/Japanese subtitles create a new editable job.")
                 )),

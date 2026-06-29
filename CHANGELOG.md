@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Rebuilt the web subtitle preview as a side-by-side timing grid with Japanese subtitles and direct English translation in separate wrapping columns, preserving multi-select and preventing long translated lines from overlapping nearby rows.
 - Added job-list clearing controls and rebuilt subtitle preview rows so time stays in a left column, subtitle text wraps on the right, selected rows do not overlap, and preview time can switch between seconds and `HH:MM:SS.mmm`.
 - Renamed the existing-subtitle import panel to `Load subtitle files into preview`, clarified that it creates/attaches SRT files for the Preview and line editor, and made attach actions reload the selected job preview.
 - Moved model configuration to the top of the web workflow column, fixed dark dropdown option contrast, and clarified that the Japanese model cache stores Hugging Face ASR/listening files while Gemma/Ollama English models stay in Ollama storage.

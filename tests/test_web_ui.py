@@ -42,8 +42,13 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Time display" in HTML
     assert "Seconds, e.g. 62.5s" in HTML
     assert "Hours:minutes:seconds, e.g. 00:01:02.500" in HTML
+    assert "preview-header" in HTML
     assert "preview-time" in HTML
     assert "preview-text" in HTML
+    assert "user-select: none" in HTML
+    assert "Japanese subtitles" in HTML
+    assert "Direct English translation" in HTML
+    assert "No direct English loaded" in HTML
     assert "Transcription and translation models" in HTML
     assert "model-settings-panel" in HTML
     assert "select option" in HTML
