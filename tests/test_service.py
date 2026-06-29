@@ -10,6 +10,8 @@ from local_subtitle_stack.domain import (
     ChunkPlan,
     Cue,
     JOB_STATUS_COMPLETED,
+    JOB_STATUS_PAUSED,
+    JOB_STATUS_QUEUED,
     JOB_STATUS_WORKING,
     SceneContextBlock,
     StageProgress,
@@ -24,7 +26,7 @@ from local_subtitle_stack.domain import (
 from local_subtitle_stack.guards import ResourceSnapshot
 from local_subtitle_stack.integrations import SubtitleEditClient
 from local_subtitle_stack.queue import QueueError, QueueStore
-from local_subtitle_stack.service import ASR_ENGINE_QWEN3, ASR_ENGINE_REAZON_K2, WorkerService
+from local_subtitle_stack.service import ASR_ENGINE_QWEN3, ASR_ENGINE_REAZON_K2, PauseRequested, WorkerService
 from local_subtitle_stack.utils import subtitle_output_dir
 
 
@@ -1312,6 +1314,62 @@ def test_queued_video_status_says_waiting_to_start(monkeypatch: pytest.MonkeyPat
 
     assert row["status"] == "queued"
     assert row["step_text"] == "Waiting to start. Press Start processing all jobs."
+
+
+def test_stop_queued_job_pauses_before_processing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "stop-queued.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+
+    stopped = service.stop_job(manifest.job_id)
+    row = service.status_rows()[0]
+
+    assert stopped.status == JOB_STATUS_PAUSED
+    assert row["status"] == JOB_STATUS_PAUSED
+    assert row["latest_event_message"] == "Job stopped before processing started."
+
+
+def test_stop_working_job_pauses_at_safe_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "stop-working.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+    working_dir, working_manifest = service.store.claim_next_job()
+    assert working_dir is not None
+    assert working_manifest.status == JOB_STATUS_WORKING
+
+    service.stop_job(manifest.job_id)
+    row = service.status_rows()[0]
+
+    assert row["status"] == JOB_STATUS_WORKING
+    assert row["stop_requested"] == "true"
+    with pytest.raises(PauseRequested):
+        service._should_pause(working_dir, working_manifest)
+    paused_dir, paused_manifest = service.store.find_job(manifest.job_id)
+    assert paused_dir.parent == service.store.incoming_dir
+    assert paused_manifest.status == JOB_STATUS_PAUSED
+
+
+def test_resuming_stopped_job_clears_stop_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "resume-stopped.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+    working_dir, working_manifest = service.store.claim_next_job()
+    assert working_dir is not None
+
+    service.stop_job(manifest.job_id)
+    with pytest.raises(PauseRequested):
+        service._should_pause(working_dir, working_manifest)
+    resumed = service.resume(manifest.job_id)
+    row = service.status_rows()[0]
+
+    assert resumed.status == JOB_STATUS_QUEUED
+    assert row["stop_requested"] == "false"
 
 
 def test_status_rows_include_stage_and_overall_progress(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

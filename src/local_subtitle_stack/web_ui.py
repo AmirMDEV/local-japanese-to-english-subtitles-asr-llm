@@ -596,6 +596,7 @@ HTML = r"""<!doctype html>
       if (!row) return "Start at Step 1: choose videos or an existing subtitle file.";
       if (row.status === "completed") return "Review output now: open the subtitle lines below, edit any bad line, or open the saved files.";
       if (row.status === "failed") return "This job failed. Read the latest message, then use Run this job again.";
+      if (row.stop_requested === "true") return "Stopping this job after the current safe step.";
       if (row.status === "queued") return "Queued. Press Start processing all jobs when ready.";
       return `Now doing: ${stageLabel(row.stage)}. Wait, or press Stop after current safe step.`;
     };
@@ -723,6 +724,8 @@ HTML = r"""<!doctype html>
         });
       };
       const deleteSelectedJob = () => deleteJob(selectedJobId);
+      const canStopJob = row => row && ["working", "queued"].includes(row.status) && row.stop_requested !== "true";
+      const stopJob = jobId => post("/api/job/stop", {job_id:jobId}, () => refresh()).catch(err=>setError(err.message));
       const clearJobs = async mode => {
         const removable = jobs.filter(row => mode === "finished" ? ["completed", "failed", "paused"].includes(row.status) : row.status !== "working");
         if (!removable.length) return;
@@ -948,9 +951,10 @@ HTML = r"""<!doctype html>
             jobs.length ? jobs.map(row => e("div", {key:row.job_id, className:`job-card ${row.job_id===selectedJobId?"active":""}`},
               e("button", {className:"job-row", onClick:()=>setSelectedJobId(row.job_id)},
                 e("strong", null, row.source),
-                e("span", {className:"tiny"}, `${row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
+                e("span", {className:"tiny"}, `${row.stop_requested === "true" ? "stopping" : row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
                 e("span", null, jobStepText(row))
               ),
+              canStopJob(row) ? e("button", {className:"job-delete", title:"Stop this job after current safe step", "aria-label":`Stop ${row.source} after current safe step`, onClick:()=>stopJob(row.job_id)}, "Stop") : null,
               e("button", {className:"job-delete", title:"Remove job from list", "aria-label":`Remove ${row.source} from job list`, disabled:row.status === "working", onClick:()=>deleteJob(row.job_id)}, "X")
             )) : e("div", {className:"empty"}, "No jobs yet.")
           ),
@@ -1029,6 +1033,7 @@ HTML = r"""<!doctype html>
                 hasLiveProgress(selectedRow) ? progressPanel(selectedRow, "Running step progress") : null,
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/job/retry", {job_id:selectedJobId})}, "Run this job again"),
+                  e("button", {className:"danger", disabled:!canStopJob(selectedRow), onClick:()=>stopJob(selectedJobId)}, selectedRow?.stop_requested === "true" ? "Stopping this job" : "Stop this job after current step"),
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"folder"})}, "Open subtitle folder"),
                   e("button", {className:"danger", disabled:!selectedJobId, onClick:deleteSelectedJob}, "Delete job from list")
                 ),
@@ -1543,6 +1548,10 @@ class WebServiceState:
         self.start_worker()
         return {"job_id": manifest.job_id}
 
+    def stop_job(self, job_id: str) -> dict[str, Any]:
+        manifest = self.service.stop_job(job_id)
+        return {"job_id": manifest.job_id}
+
     def delete_job(self, job_id: str) -> dict[str, Any]:
         self.service.store.remove_from_list(job_id)
         return {"deleted": job_id}
@@ -1982,6 +1991,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(APP_STATE.stop_worker())
             elif self.path == "/api/job/retry":
                 self._send_json(APP_STATE.retry(str(payload["job_id"])))
+            elif self.path == "/api/job/stop":
+                self._send_json(APP_STATE.stop_job(str(payload["job_id"])))
             elif self.path == "/api/job/delete":
                 self._send_json(APP_STATE.delete_job(str(payload["job_id"])))
             elif self.path == "/api/job/notes":

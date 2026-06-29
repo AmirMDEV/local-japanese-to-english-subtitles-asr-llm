@@ -19,6 +19,8 @@ from .config import AppConfig
 from .asr_models import QWEN3_ASR_1_7B_MODEL_ID, QWEN3_ASR_ENGINE, REAZON_K2_ENGINE, REAZON_K2_MODEL_ID
 from .domain import (
     JOB_STATUS_COMPLETED,
+    JOB_STATUS_FAILED,
+    JOB_STATUS_PAUSED,
     JOB_STATUS_QUEUED,
     JOB_STATUS_WORKING,
     STAGE_ADAPTED,
@@ -381,7 +383,7 @@ class WorkerService:
 
     def status_rows(self) -> list[dict[str, str]]:
         rows: list[dict[str, str]] = []
-        for _job_dir, manifest, state in self.store.list_jobs():
+        for job_dir, manifest, state in self.store.list_jobs():
             progress = manifest.current_progress
             latest_event = manifest.events[-1] if manifest.events else None
             rows.append(
@@ -407,6 +409,7 @@ class WorkerService:
                     "has_reference": "true" if manifest.imported_tracks.get("reference") else "false",
                     "include_adapted_english": "true" if manifest.include_adapted_english else "false",
                     "prefer_fast_translation": "true" if manifest.prefer_fast_translation else "false",
+                    "stop_requested": "true" if self.store.job_stop_requested(job_dir) else "false",
                     "current_model": self._current_model_name(manifest),
                     "latest_event_message": latest_event.message if latest_event else "",
                     "latest_event_level": latest_event.level if latest_event else "",
@@ -678,6 +681,22 @@ class WorkerService:
         self._save_manifest(job_dir, manifest)
         return manifest
 
+    def stop_job(self, job_id: str) -> JobManifest:
+        job_dir, manifest = self.store.find_job(job_id)
+        if manifest.status in {JOB_STATUS_COMPLETED, JOB_STATUS_FAILED}:
+            raise QueueError("This job has already finished.")
+        if manifest.status == JOB_STATUS_PAUSED:
+            return manifest
+        if manifest.status == JOB_STATUS_QUEUED:
+            self._append_event(manifest, "info", "Job stopped before processing started.")
+            paused_dir, paused_manifest = self.store.mark_paused(job_dir, manifest)
+            self._write_resume_state(paused_dir, paused_manifest)
+            return paused_manifest
+        self.store.set_job_stop(job_dir, True)
+        self._append_event(manifest, "info", "Job will stop after the next safe step.")
+        self._save_manifest(job_dir, manifest)
+        return manifest
+
     def open_review(self, job_id: str | None = None) -> list[Path]:
         job_dir, manifest = self._resolve_target_job(job_id)
         self._sync_existing_outputs_to_export(job_dir, manifest)
@@ -855,7 +874,9 @@ class WorkerService:
             raise QueueError(str(exc)) from exc
 
     def _should_pause(self, job_dir: Path, manifest: JobManifest) -> None:
-        if self.store.pause_requested():
+        if self.store.pause_requested() or self.store.job_stop_requested(job_dir):
+            if self.store.job_stop_requested(job_dir):
+                self._append_event(manifest, "info", "Job stopped after the current safe step.")
             paused_dir, paused_manifest = self.store.mark_paused(job_dir, manifest)
             self._write_resume_state(paused_dir, paused_manifest)
             raise PauseRequested()

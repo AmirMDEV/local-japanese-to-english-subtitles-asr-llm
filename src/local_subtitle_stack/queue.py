@@ -30,6 +30,7 @@ class QueueError(RuntimeError):
 
 class QueueStore:
     REMOVED_MARKER = ".removed-from-list"
+    STOP_MARKER = ".stop-after-current-step"
 
     def __init__(self, config: AppConfig) -> None:
         self.config = config
@@ -234,6 +235,16 @@ class QueueStore:
         (job_dir / self.REMOVED_MARKER).write_text(now_iso(), encoding="utf-8")
         return manifest
 
+    def job_stop_requested(self, job_dir: Path) -> bool:
+        return (job_dir / self.STOP_MARKER).exists()
+
+    def set_job_stop(self, job_dir: Path, requested: bool) -> None:
+        marker = job_dir / self.STOP_MARKER
+        if requested:
+            marker.write_text(now_iso(), encoding="utf-8")
+        else:
+            marker.unlink(missing_ok=True)
+
     def claim_next_job(self) -> tuple[Path, JobManifest] | None:
         for job_dir in self._job_dirs(self.working_dir):
             manifest = self.load_manifest(job_dir)
@@ -292,5 +303,6 @@ class QueueStore:
             target = self.incoming_dir / job_dir.name
             shutil.move(str(job_dir), str(target))
             job_dir = target
+        self.set_job_stop(job_dir, False)
         self.save_manifest(job_dir, manifest)
         return job_dir, manifest
