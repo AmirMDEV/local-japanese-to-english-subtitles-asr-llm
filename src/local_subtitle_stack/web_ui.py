@@ -336,6 +336,10 @@ HTML = r"""<!doctype html>
     .change-time { color: var(--muted); font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
     .change-before { color: var(--muted); }
     .change-after { color: var(--soft); }
+    .line-edit-grid { display: grid; gap: 12px; }
+    .line-edit-field { display: grid; gap: 6px; }
+    .line-edit-field strong { font-size: 13px; }
+    .line-edit-field span { color: var(--muted); font-size: 12px; line-height: 1.35; }
     .section-note { color: var(--muted); margin: 0; }
     textarea {
       min-height: 90px;
@@ -884,11 +888,27 @@ HTML = r"""<!doctype html>
                   e("strong", null, "Drop an .srt file here to edit existing subtitles"),
                   e("span", null, selectedJobId ? "Dropped file attaches to the selected job." : "Dropped direct English translation/Japanese subtitles create a new editable job.")
                 )),
-                line ? e("div", {className:"stack"},
-                  e("textarea", {value:line.japanese || "", onChange:ev=>setLine({...line, japanese:ev.target.value}), placeholder:"Japanese"}),
-                  e("textarea", {value:line.literal_english || "", onChange:ev=>setLine({...line, literal_english:ev.target.value}), placeholder:"Direct English translation"}),
-                  e("textarea", {value:line.adapted_english || "", onChange:ev=>setLine({...line, adapted_english:ev.target.value}), placeholder:"Context-applied English"}),
-                  e("textarea", {value:line.reference || "", onChange:ev=>setLine({...line, reference:ev.target.value}), placeholder:"Reference"}),
+                line ? e("div", {className:"line-edit-grid"},
+                  e("label", {className:"line-edit-field"},
+                    e("strong", null, "Japanese source subtitles"),
+                    e("span", null, "What the listening model heard. Edit this if the Japanese transcript is wrong."),
+                    e("textarea", {value:line.japanese || "", onChange:ev=>setLine({...line, japanese:ev.target.value}), placeholder:"Japanese source subtitles"})
+                  ),
+                  e("label", {className:"line-edit-field"},
+                    e("strong", null, "Direct English translation"),
+                    e("span", null, "Closest English meaning, kept fairly literal. Use this to check what the line says."),
+                    e("textarea", {value:line.literal_english || "", onChange:ev=>setLine({...line, literal_english:ev.target.value}), placeholder:"Direct English translation"})
+                  ),
+                  e("label", {className:"line-edit-field"},
+                    e("strong", null, "Context-applied English"),
+                    e("span", null, "Final smoother subtitle line after context is applied. This is usually the version you review and export."),
+                    e("textarea", {value:line.adapted_english || "", onChange:ev=>setLine({...line, adapted_english:ev.target.value}), placeholder:"Context-applied English"})
+                  ),
+                  e("label", {className:"line-edit-field"},
+                    e("strong", null, "Reference subtitles"),
+                    e("span", null, "Optional outside subtitle track for comparison only. It helps review, but is not the main output."),
+                    e("textarea", {value:line.reference || "", onChange:ev=>setLine({...line, reference:ev.target.value}), placeholder:"Reference subtitles"})
+                  ),
                   e("button", {onClick:saveLine}, "Save line")
                 ) : null
               )

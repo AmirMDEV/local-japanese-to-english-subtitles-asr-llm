@@ -49,6 +49,12 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Japanese subtitles" in HTML
     assert "Direct English translation" in HTML
     assert "No direct English loaded" in HTML
+    assert "Japanese source subtitles" in HTML
+    assert "What the listening model heard" in HTML
+    assert "Closest English meaning" in HTML
+    assert "Final smoother subtitle line" in HTML
+    assert "Reference subtitles" in HTML
+    assert "Optional outside subtitle track" in HTML
     assert "setInterval(() =>" in HTML
     assert "/api/job?id=" in HTML
     assert "Transcription and translation models" in HTML
