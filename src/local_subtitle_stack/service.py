@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
@@ -369,6 +370,7 @@ class WorkerService:
         self._save_manifest(job_dir, manifest)
         if job_dir.parent != self.store.done_dir:
             job_dir, manifest = self.store.mark_completed(job_dir, manifest)
+            self._write_resume_state(job_dir, manifest)
         return manifest
 
     def status_rows(self) -> list[dict[str, str]]:
@@ -772,7 +774,8 @@ class WorkerService:
             self._stage_translate_literal(job_dir, manifest)
             self._stage_translate_adapted(job_dir, manifest)
             self._stage_finalize(job_dir, manifest)
-            self.store.mark_completed(job_dir, manifest)
+            completed_dir, completed_manifest = self.store.mark_completed(job_dir, manifest)
+            self._write_resume_state(completed_dir, completed_manifest)
         except PauseRequested:
             return
         except Exception as exc:
@@ -818,7 +821,8 @@ class WorkerService:
 
     def _should_pause(self, job_dir: Path, manifest: JobManifest) -> None:
         if self.store.pause_requested():
-            self.store.mark_paused(job_dir, manifest)
+            paused_dir, paused_manifest = self.store.mark_paused(job_dir, manifest)
+            self._write_resume_state(paused_dir, paused_manifest)
             raise PauseRequested()
 
     def _update_metrics(self, manifest: JobManifest) -> None:
@@ -984,6 +988,47 @@ class WorkerService:
     def _save_manifest(self, job_dir: Path, manifest: JobManifest) -> None:
         self._update_metrics(manifest)
         self.store.save_manifest(job_dir, manifest)
+        self._write_resume_state(job_dir, manifest)
+
+    def _write_resume_state(self, job_dir: Path, manifest: JobManifest) -> None:
+        try:
+            output_dir = self._ensure_output_dir_for_manifest(manifest)
+            path = output_dir / f"{Path(manifest.source_name).stem}.resume.json"
+            atomic_write_json(
+                path,
+                {
+                    "job_id": manifest.job_id,
+                    "source_path": manifest.source_path,
+                    "source_name": manifest.source_name,
+                    "queue_job_dir": str(job_dir),
+                    "status": manifest.status,
+                    "current_stage": manifest.current_stage,
+                    "updated_at": manifest.updated_at,
+                    "current_progress": asdict(manifest.current_progress) if manifest.current_progress is not None else None,
+                    "checkpoints": {
+                        name: {
+                            "status": checkpoint.status,
+                            "attempts": checkpoint.attempts,
+                            "updated_at": checkpoint.updated_at,
+                            "details": checkpoint.details,
+                        }
+                        for name, checkpoint in manifest.checkpoints.items()
+                    },
+                    "chunk_plan": [
+                        {
+                            "index": chunk.index,
+                            "start": chunk.start,
+                            "end": chunk.end,
+                            "path": chunk.path,
+                        }
+                        for chunk in manifest.chunk_plan
+                    ],
+                    "artifacts": manifest.artifacts,
+                    "export_dir": manifest.export_dir,
+                },
+            )
+        except OSError as exc:
+            manifest.checkpoint(manifest.current_stage).details["resume_state_error"] = f"{type(exc).__name__}: {exc}"
 
     def _cue_signature(self, path: Path) -> tuple[int, int]:
         stat = path.stat()
@@ -1882,10 +1927,12 @@ class WorkerService:
             stage=manifest.current_stage,
         )
         if checkpoint.attempts >= 2:
-            self.store.mark_failed(job_dir, manifest, detail)
+            failed_dir, failed_manifest = self.store.mark_failed(job_dir, manifest, detail)
+            self._write_resume_state(failed_dir, failed_manifest)
             raise QueueError(detail)
         self._clear_stage_progress(manifest)
-        self.store.requeue_working(job_dir, manifest, detail)
+        queued_dir, queued_manifest = self.store.requeue_working(job_dir, manifest, detail)
+        self._write_resume_state(queued_dir, queued_manifest)
         raise QueueError(detail)
 
     def _source_key(self, path: Path) -> str:

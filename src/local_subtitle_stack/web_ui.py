@@ -512,6 +512,13 @@ HTML = r"""<!doctype html>
           setLine(null);
         }).catch(err => setError(err.message));
       }, [selectedJobId]);
+      React.useEffect(() => {
+        if (!selectedJobId) return;
+        const id = setInterval(() => {
+          api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob).catch(err => setError(err.message));
+        }, 1500);
+        return () => clearInterval(id);
+      }, [selectedJobId]);
 
       const pickFolder = () => { setError(""); api("/api/pick-folder").then(d => d.path && setTargets([d.path])).catch(err => setError(err.message)); };
       const pickFiles = () => { setError(""); api("/api/pick-files").then(d => d.paths?.length && setTargets(d.paths)).catch(err => setError(err.message)); };

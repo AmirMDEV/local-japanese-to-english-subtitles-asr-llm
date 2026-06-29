@@ -135,7 +135,10 @@ class FakeReazonK2ASR(FakeASR):
 
 
 class FailOnSecondChunkASR(FakeASR):
+    calls: list[str] = []
+
     def transcribe_chunk(self, chunk_path: Path, batch_size: int, device: str) -> list[Cue]:
+        self.__class__.calls.append(chunk_path.stem)
         if "0002" in chunk_path.stem:
             raise RuntimeError("synthetic transcription failure")
         return [
@@ -471,6 +474,7 @@ def test_partial_japanese_srt_survives_when_transcription_fails_midway(
     tmp_path: Path,
 ) -> None:
     patch_runtime(monkeypatch)
+    FailOnSecondChunkASR.calls = []
     monkeypatch.setattr("local_subtitle_stack.service.TransformersASRClient", FailOnSecondChunkASR)
     service = build_service(tmp_path, SuccessfulOllama())
     service.ffmpeg = TwoChunkFFmpeg()
@@ -486,10 +490,16 @@ def test_partial_japanese_srt_survives_when_transcription_fails_midway(
     export_ja = export_dir / loaded.artifacts["ja_srt"]
 
     assert job_dir.parent.name == "failed"
+    assert FailOnSecondChunkASR.calls.count("chunk_0001") == 1
+    assert FailOnSecondChunkASR.calls.count("chunk_0002") == 2
     assert local_ja.exists()
     assert export_ja.exists()
     assert "partial first chunk" in local_ja.read_text(encoding="utf-8")
     assert "partial first chunk" in export_ja.read_text(encoding="utf-8")
+    resume_state = json.loads((export_dir / "partial-ja.resume.json").read_text(encoding="utf-8"))
+    assert resume_state["status"] == "failed"
+    assert resume_state["checkpoints"][STAGE_TRANSCRIBE]["details"]["completed_chunks"] == 1
+    assert resume_state["chunk_plan"][0]["index"] == 1
 
 
 def test_job_can_skip_easy_english_outputs(

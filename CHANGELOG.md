@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Added source-side resume state JSON beside exported subtitles and made the web preview poll the selected job so partial Japanese subtitles appear while transcription is still running.
 - Audited the full web UI scroll layout on desktop and mobile, then tightened the workflow order: compact mobile step cards, two-column desktop model settings, existing-subtitle import beside input selection, jobs beside review, and automatic first-job selection on reload.
 - Rebuilt the web subtitle preview as a side-by-side timing grid with Japanese subtitles and direct English translation in separate wrapping columns, preserving multi-select and preventing long translated lines from overlapping nearby rows.
 - Added job-list clearing controls and rebuilt subtitle preview rows so time stays in a left column, subtitle text wraps on the right, selected rows do not overlap, and preview time can switch between seconds and `HH:MM:SS.mmm`.

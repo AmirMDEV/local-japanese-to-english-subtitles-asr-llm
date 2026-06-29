@@ -49,6 +49,8 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Japanese subtitles" in HTML
     assert "Direct English translation" in HTML
     assert "No direct English loaded" in HTML
+    assert "setInterval(() =>" in HTML
+    assert "/api/job?id=" in HTML
     assert "Transcription and translation models" in HTML
     assert "model-settings-panel" in HTML
     assert "select option" in HTML
