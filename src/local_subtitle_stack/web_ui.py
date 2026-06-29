@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -613,7 +614,15 @@ HTML = r"""<!doctype html>
     const progressPercent = row => Math.max(0, Math.min(100, Number(row?.stage_progress_percent || row?.overall_progress_percent || 0)));
     const hasLiveProgress = row => Boolean(row && row.stage_progress_message);
     const progressAgeSeconds = row => Number(row?.progress_age_seconds || 0);
-    const progressAgeLabel = row => row?.progress_age_text ? `${row.progress_age_text} ago` : "No progress timestamp";
+      const progressAgeLabel = row => row?.progress_age_text ? `${row.progress_age_text} ago` : "No progress timestamp";
+    const workerResourceText = resources => {
+      if (!resources || !resources.pid) return "";
+      const cpu = resources.cpu_percent === "" ? "CPU warming up" : `CPU ${resources.cpu_percent}%`;
+      const ram = resources.memory_mb === "" ? "" : `RAM ${resources.memory_mb} MB`;
+      const gpu = resources.gpu_util_percent === "" ? "" : `GPU ${resources.gpu_util_percent}%`;
+      const vram = resources.gpu_memory_used_mb === "" ? "" : `VRAM ${resources.gpu_memory_used_mb}/${resources.gpu_memory_total_mb} MB`;
+      return [cpu, ram, gpu, vram].filter(Boolean).join(" | ");
+    };
     const progressHealth = row => {
       if (!row || row.status !== "working" || !row.progress_age_seconds) return "";
       const age = progressAgeSeconds(row);
@@ -621,11 +630,12 @@ HTML = r"""<!doctype html>
       if (age < 600) return `Watch | no saved progress for ${row.progress_age_text}`;
       return `Possible stuck | no saved progress for ${row.progress_age_text}`;
     };
-    const progressPanel = (row, label) => row ? e("div", {className:"progress-card"},
+    const progressPanel = (row, label, workerResources) => row ? e("div", {className:"progress-card"},
       e("div", {className:"progress-head"}, e("strong", null, label), e("span", null, `${progressPercent(row).toFixed(0)}%`)),
       e("progress", {max:"100", value:progressPercent(row), "aria-label":label}),
       e("p", {className:"tiny"}, row.stage_progress_message || row.step_text || selectedStageLabel(row)),
-      progressHealth(row) ? e("p", {className:"tiny"}, progressHealth(row)) : null
+      progressHealth(row) ? e("p", {className:"tiny"}, progressHealth(row)) : null,
+      workerResourceText(workerResources) ? e("p", {className:"tiny"}, workerResourceText(workerResources)) : null
     ) : null;
     const reviewHint = row => {
       if (!row) return "Start at Step 1: choose videos or an existing subtitle file.";
@@ -1009,6 +1019,7 @@ HTML = r"""<!doctype html>
                 e("strong", null, row.source),
                 e("span", {className:"tiny"}, `${row.stop_requested === "true" ? "stopping" : row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
                 progressHealth(row) ? e("span", {className:"tiny"}, progressHealth(row)) : null,
+                row.status === "working" && workerResourceText(status.worker_resources) ? e("span", {className:"tiny"}, workerResourceText(status.worker_resources)) : null,
                 e("span", null, jobStepText(row))
               ),
               canStopJob(row) ? e("button", {className:"job-delete", title:"Stop this job after current safe step", "aria-label":`Stop ${row.source} after current safe step`, onClick:()=>stopJob(row.job_id)}, "Stop") : null,
@@ -1087,7 +1098,7 @@ HTML = r"""<!doctype html>
                   e("div", {className:"metric"}, e("span", null, "Progress"), e("strong", null, `${selectedRow.overall_progress_percent || 0}%`)),
                   e("div", {className:"metric"}, e("span", null, "Model in use"), e("strong", null, modelText))
                 ) : e("div", {className:"empty"}, "Select a job."),
-                hasLiveProgress(selectedRow) ? progressPanel(selectedRow, "Running step progress") : null,
+                hasLiveProgress(selectedRow) ? progressPanel(selectedRow, "Running step progress", status.worker_resources) : null,
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", disabled:!canResumeJob(selectedRow), onClick:()=>resumeJob(selectedJobId)}, selectedRow?.status === "working" ? "Resume stuck job" : "Resume this job"),
                   e("button", {className:"danger", disabled:!canStopJob(selectedRow), onClick:()=>stopJob(selectedJobId)}, selectedRow?.stop_requested === "true" ? "Stopping this job" : "Stop this job after current step"),
@@ -1175,7 +1186,7 @@ HTML = r"""<!doctype html>
             ),
             panel("second-pass", "second-pass-panel", "Second-pass changes", e("span", null, status.rebuild_running ? "Running" : `${(job?.coherence_review || []).length} changes`), "panel-body stack",
                 e("p", {className:"section-note"}, "After second-pass coherence review, changed context-applied English lines appear here. Click a change to select that subtitle line. Restore before puts that one line back."),
-                status.rebuild_running && selectedRow ? progressPanel(selectedRow, "Second-pass coherence review progress") : null,
+                status.rebuild_running && selectedRow ? progressPanel(selectedRow, "Second-pass coherence review progress", status.worker_resources) : null,
                 job?.coherence_review?.length ? e("div", {className:"change-list"}, job.coherence_review.map(change => e("div", {key:change.cue_index, className:"change-row", role:"button", tabIndex:0, onClick:()=>selectCoherenceChange(change), onKeyDown:ev=>{ if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); selectCoherenceChange(change); } }},
                   e("span", {className:"change-time"}, `#${change.cue_index}\n${formatSecondsDisplay(change.start)} - ${formatSecondsDisplay(change.end)}`),
                   e("span", {className:"change-before"}, change.before),
@@ -1454,17 +1465,80 @@ class WebServiceState:
         self.worker_process: subprocess.Popen[str] | None = None
         self.rebuild_process: subprocess.Popen[str] | None = None
         self.rebuild_log = ""
+        self.worker_resource_sample: tuple[int, float, float] | None = None
+        self.gpu_resource_cache: tuple[float, dict[str, str]] | None = None
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
+            worker_pid = self.worker_pid()
             return {
                 "jobs": self.service.status_rows(),
                 "pause_requested": self.service.store.pause_requested(),
-                "worker_running": self.worker_pid() is not None,
+                "worker_running": worker_pid is not None,
+                "worker_resources": self.worker_resources(worker_pid),
                 "rebuild_running": self._running(self.rebuild_process),
                 "rebuild_log": self.rebuild_log[-6000:],
                 "settings": self.settings(),
             }
+
+    def worker_resources(self, pid: int | None) -> dict[str, Any]:
+        if not pid:
+            self.worker_resource_sample = None
+            return {}
+        try:
+            process = psutil.Process(pid)
+            processes = [process, *process.children(recursive=True)]
+            cpu_seconds = sum(item.cpu_times().user + item.cpu_times().system for item in processes if item.is_running())
+            memory_mb = sum(item.memory_info().rss for item in processes if item.is_running()) / (1024 * 1024)
+        except (psutil.Error, OSError):
+            return {}
+
+        now = time.monotonic()
+        cpu_percent: str = ""
+        previous = self.worker_resource_sample
+        if previous and previous[0] == pid and now > previous[1]:
+            cpu_percent = f"{max(((cpu_seconds - previous[2]) / (now - previous[1])) * 100.0, 0.0):.0f}"
+        self.worker_resource_sample = (pid, now, cpu_seconds)
+        return {
+            "pid": pid,
+            "cpu_percent": cpu_percent,
+            "memory_mb": f"{memory_mb:.0f}",
+            **self.gpu_resources(),
+        }
+
+    def gpu_resources(self) -> dict[str, str]:
+        now = time.monotonic()
+        if self.gpu_resource_cache and now - self.gpu_resource_cache[0] < 5.0:
+            return self.gpu_resource_cache[1]
+        data = {
+            "gpu_util_percent": "",
+            "gpu_memory_used_mb": "",
+            "gpu_memory_total_mb": "",
+        }
+        try:
+            completed = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+                creationflags=no_window_creationflags(),
+            )
+            first_line = (completed.stdout or "").splitlines()[0]
+            util, used, total = [part.strip() for part in first_line.split(",", 2)]
+            data = {
+                "gpu_util_percent": util,
+                "gpu_memory_used_mb": used,
+                "gpu_memory_total_mb": total,
+            }
+        except (OSError, subprocess.SubprocessError, IndexError, ValueError):
+            pass
+        self.gpu_resource_cache = (now, data)
+        return data
 
     def settings(self) -> dict[str, Any]:
         config = self.service.config

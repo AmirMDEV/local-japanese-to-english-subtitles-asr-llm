@@ -137,6 +137,11 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Likely active" in HTML
     assert "Possible stuck" in HTML
     assert "No progress timestamp" in HTML
+    assert "worker_resources" in HTML
+    assert "workerResourceText" in HTML
+    assert "CPU ${resources.cpu_percent}%" in HTML
+    assert "GPU ${resources.gpu_util_percent}%" in HTML
+    assert "VRAM ${resources.gpu_memory_used_mb}/${resources.gpu_memory_total_mb} MB" in HTML
     assert "progress_stage" in HTML
     assert "Second-pass changes" in HTML
     assert "Restore before" in HTML
