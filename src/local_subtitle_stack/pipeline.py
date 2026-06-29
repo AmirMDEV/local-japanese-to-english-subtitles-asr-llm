@@ -104,6 +104,7 @@ def build_context_notes(
     global_context: str | None,
     scene_contexts: list[SceneContextBlock],
     reference_cues: list[Cue] | None = None,
+    surrounding_cues: list[Cue] | None = None,
 ) -> str | None:
     sections: list[str] = []
     global_note = (global_context or "").strip()
@@ -126,6 +127,18 @@ def build_context_notes(
                 for block in matches
             ]
             sections.append("Scene-specific context:\n" + "\n".join(scene_lines))
+
+    if surrounding_cues:
+        surrounding_lines = [
+            f"- {format_timecode(cue.start)} to {format_timecode(cue.end)}: {cue.text.strip()}"
+            for cue in surrounding_cues
+            if cue.text.strip()
+        ]
+        if surrounding_lines:
+            sections.append(
+                "Surrounding subtitle context (previous/next lines, not target lines):\n"
+                + "\n".join(surrounding_lines)
+            )
 
     if reference_cues:
         group_start = min((cue.start for cue in group), default=0.0)

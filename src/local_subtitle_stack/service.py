@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from copy import deepcopy
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -1514,6 +1515,7 @@ class WorkerService:
         group: list[Cue],
         group_start_index: int,
         source_cues: list[Cue],
+        context_source_cues: list[Cue],
         literal_cues: list[Cue],
         glossary: list[dict[str, str]],
         metadata: str,
@@ -1525,13 +1527,11 @@ class WorkerService:
             global_context=manifest.job_context,
             scene_contexts=manifest.scene_contexts,
             reference_cues=reference_cues,
+            surrounding_cues=self._surrounding_context_cues(group, context_source_cues),
         )
         if adapted:
             literal_group = literal_cues[group_start_index : group_start_index + len(group)]
-            prev_context = source_cues[max(0, group_start_index - 2) : group_start_index]
-            next_context = source_cues[
-                group_start_index + len(group) : group_start_index + len(group) + 2
-            ]
+            prev_context, next_context = self._previous_next_context_cues(group, context_source_cues, count=2)
             return build_adapted_prompt(
                 group=group,
                 literal_group=literal_group,
@@ -1565,6 +1565,7 @@ class WorkerService:
         group: list[Cue],
         group_start_index: int,
         source_cues: list[Cue],
+        context_source_cues: list[Cue],
         literal_cues: list[Cue],
         glossary: list[dict[str, str]],
         metadata: str,
@@ -1576,6 +1577,7 @@ class WorkerService:
             group=group,
             group_start_index=group_start_index,
             source_cues=source_cues,
+            context_source_cues=context_source_cues,
             literal_cues=literal_cues,
             glossary=glossary,
             metadata=metadata,
@@ -1606,6 +1608,7 @@ class WorkerService:
                 group=group[:midpoint],
                 group_start_index=group_start_index,
                 source_cues=source_cues,
+                context_source_cues=context_source_cues,
                 literal_cues=literal_cues,
                 glossary=glossary,
                 metadata=metadata,
@@ -1619,6 +1622,7 @@ class WorkerService:
                 group=group[midpoint:],
                 group_start_index=group_start_index + midpoint,
                 source_cues=source_cues,
+                context_source_cues=context_source_cues,
                 literal_cues=literal_cues,
                 glossary=glossary,
                 metadata=metadata,
@@ -1646,6 +1650,7 @@ class WorkerService:
         output_cues_path: Path | None = None,
         output_srt_path: Path | None = None,
         partial_path: Path | None = None,
+        prompt_context_cues_path: Path | None = None,
     ) -> None:
         checkpoint = manifest.checkpoint(stage_name)
         if checkpoint.status == "completed":
@@ -1675,6 +1680,7 @@ class WorkerService:
         partial_output_path = partial_path or (job_dir / f"{output_artifact}.partial.json")
 
         source_cues = self._load_cues_cached(source_path)
+        context_source_cues = self._load_cues_cached(prompt_context_cues_path) if prompt_context_cues_path else source_cues
         literal_cues = self._load_cues_cached(literal_source_path) if adapted else []
         reference_cues = self._reference_cues_for_job(job_dir, manifest)
         glossary = load_glossary(manifest.glossary_path)
@@ -1716,6 +1722,7 @@ class WorkerService:
                     group=group,
                     group_start_index=group_start_index,
                     source_cues=source_cues,
+                    context_source_cues=context_source_cues,
                     literal_cues=literal_cues,
                     glossary=glossary,
                     metadata=metadata,
@@ -1823,6 +1830,7 @@ class WorkerService:
         output_cues_path: Path | None = None,
         output_srt_path: Path | None = None,
         partial_path: Path | None = None,
+        prompt_context_cues_path: Path | None = None,
     ) -> None:
         self._translate_stage(
             job_dir=job_dir,
@@ -1837,6 +1845,7 @@ class WorkerService:
             output_cues_path=output_cues_path,
             output_srt_path=output_srt_path,
             partial_path=partial_path,
+            prompt_context_cues_path=prompt_context_cues_path,
         )
 
     def _mark_adapted_stage_skipped(self, manifest: JobManifest) -> None:
@@ -1854,6 +1863,7 @@ class WorkerService:
         output_cues_path: Path | None = None,
         output_srt_path: Path | None = None,
         partial_path: Path | None = None,
+        prompt_context_cues_path: Path | None = None,
     ) -> None:
         if not manifest.include_adapted_english:
             self._mark_adapted_stage_skipped(manifest)
@@ -1880,6 +1890,7 @@ class WorkerService:
             output_cues_path=output_cues_path,
             output_srt_path=output_srt_path,
             partial_path=partial_path,
+            prompt_context_cues_path=prompt_context_cues_path,
         )
 
     def _stage_finalize(self, job_dir: Path, manifest: JobManifest) -> None:
@@ -2297,6 +2308,34 @@ class WorkerService:
             )
         self._append_event(manifest, "warning", detail, stage=STAGE_TRANSCRIBE)
 
+    def _surrounding_context_cues(
+        self,
+        group: list[Cue],
+        source_cues: list[Cue],
+        *,
+        before: int = 3,
+        after: int = 3,
+    ) -> list[Cue]:
+        prev_context, next_context = self._previous_next_context_cues(group, source_cues, count=max(before, after))
+        return prev_context[-before:] + next_context[:after]
+
+    def _previous_next_context_cues(
+        self,
+        group: list[Cue],
+        source_cues: list[Cue],
+        *,
+        count: int,
+    ) -> tuple[list[Cue], list[Cue]]:
+        if not group or not source_cues:
+            return [], []
+        source_by_index = {cue.index: position for position, cue in enumerate(source_cues)}
+        positions = [source_by_index[cue.index] for cue in group if cue.index in source_by_index]
+        if not positions:
+            return [], []
+        start = min(positions)
+        end = max(positions) + 1
+        return source_cues[max(0, start - count) : start], source_cues[end : end + count]
+
     def _selected_range_indexes(self, source_cues: list[Cue], start_seconds: float, end_seconds: float) -> set[int]:
         return {
             cue.index
@@ -2381,6 +2420,17 @@ class WorkerService:
             f"Redoing English only for {format_timecode(start_seconds)} to {format_timecode(end_seconds)}.",
             stage=STAGE_LITERAL,
         )
+        saved_stage = manifest.current_stage
+        saved_progress = deepcopy(manifest.current_progress)
+        saved_checkpoints = {
+            stage: deepcopy(manifest.checkpoint(stage))
+            for stage in (STAGE_LITERAL, STAGE_ADAPTED)
+        }
+        for stage in (STAGE_LITERAL, STAGE_ADAPTED):
+            checkpoint = manifest.checkpoint(stage)
+            checkpoint.status = "pending"
+            checkpoint.attempts = 0
+            checkpoint.details = {}
         try:
             self._stage_translate_literal(
                 job_dir,
@@ -2389,6 +2439,7 @@ class WorkerService:
                 output_srt_path=temp_paths["literal_srt"],
                 partial_path=temp_paths["literal_partial"],
                 source_cues_path=temp_source,
+                prompt_context_cues_path=source_path,
             )
             existing_literal = self._copy_existing_translation_or_raise(
                 job_dir,
@@ -2422,6 +2473,7 @@ class WorkerService:
                     output_srt_path=temp_paths["adapted_srt"],
                     partial_path=temp_paths["adapted_partial"],
                     source_cues_path=temp_source,
+                    prompt_context_cues_path=source_path,
                 )
                 existing_adapted = self._copy_existing_translation_or_raise(
                     job_dir,
@@ -2451,6 +2503,11 @@ class WorkerService:
             )
             self._save_manifest(job_dir, manifest)
         finally:
+            manifest.current_stage = saved_stage
+            manifest.current_progress = saved_progress
+            for stage, checkpoint in saved_checkpoints.items():
+                manifest.checkpoints[stage] = checkpoint
+            self._save_manifest(job_dir, manifest)
             self._cleanup_paths(temp_paths.values())
             for extra_path in (temp_source, temp_dir / "literal-merged.cues.json"):
                 extra_path.unlink(missing_ok=True)

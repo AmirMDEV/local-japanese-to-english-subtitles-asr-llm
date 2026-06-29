@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Added surrounding Japanese subtitle context to selected-range English retranslation prompts, while still replacing only the selected subtitle lines.
 - Added source-side resume state JSON beside exported subtitles and made the web preview poll the selected job so partial Japanese subtitles appear while transcription is still running.
 - Audited the full web UI scroll layout on desktop and mobile, then tightened the workflow order: compact mobile step cards, two-column desktop model settings, existing-subtitle import beside input selection, jobs beside review, and automatic first-job selection on reload.
 - Rebuilt the web subtitle preview as a side-by-side timing grid with Japanese subtitles and direct English translation in separate wrapping columns, preserving multi-select and preventing long translated lines from overlapping nearby rows.

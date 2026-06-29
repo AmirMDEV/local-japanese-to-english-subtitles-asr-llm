@@ -977,6 +977,57 @@ def test_rebuild_without_easy_english_removes_previous_easy_outputs(
     assert all(row["adapted_english"] == "" for row in preview)
 
 
+def test_range_rebuild_prompt_includes_surrounding_japanese_context(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    patch_runtime(monkeypatch)
+    ollama = SuccessfulOllama()
+    service = build_service(tmp_path, ollama)
+    source = tmp_path / "surrounding-context.ja.srt"
+    write_srt_fixture(
+        source,
+        [
+            ("00:00:00,000", "00:00:01,000", "before one"),
+            ("00:00:01,000", "00:00:02,000", "before two"),
+            ("00:00:02,000", "00:00:03,000", "selected line"),
+            ("00:00:03,000", "00:00:04,000", "after one"),
+            ("00:00:04,000", "00:00:05,000", "after two"),
+        ],
+    )
+    manifest = service.import_existing(
+        profile="default",
+        primary_subtitle=source,
+        japanese=source,
+        include_adapted_english=False,
+    )
+    service.rebuild_english(
+        manifest.job_id,
+        batch_label=None,
+        overall_context=None,
+        scene_contexts=[],
+        include_adapted_english=False,
+    )
+    ollama.calls.clear()
+
+    service.rebuild_english_range(
+        manifest.job_id,
+        batch_label=None,
+        overall_context=None,
+        scene_contexts=[],
+        start_seconds=2.0,
+        end_seconds=3.0,
+        include_adapted_english=False,
+    )
+
+    prompt = ollama.calls[0][1]
+    assert "Surrounding subtitle context" in prompt
+    assert "before one" in prompt
+    assert "before two" in prompt
+    assert "after one" in prompt
+    assert "after two" in prompt
+
+
 def test_import_existing_video_linked_japanese_and_reference_tracks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
