@@ -396,6 +396,7 @@ HTML = r"""<!doctype html>
     .change-time { color: var(--muted); font-family: Consolas, "Cascadia Mono", monospace; font-size: 12px; }
     .change-before { color: var(--muted); }
     .change-after { color: var(--soft); }
+    .change-action { display: grid; gap: 6px; justify-items: stretch; min-width: 0; }
     .line-edit-grid { display: grid; gap: 12px; }
     .line-edit-field { display: grid; gap: 6px; }
     .line-edit-field strong { font-size: 13px; }
@@ -580,6 +581,7 @@ HTML = r"""<!doctype html>
       const [dropRole, setDropRole] = React.useState("direct");
       const [lineSaveStatus, setLineSaveStatus] = React.useState("");
       const lineSaveTimer = React.useRef(null);
+      const [restoreStatus, setRestoreStatus] = React.useState({});
       const [batchLabel, setBatchLabel] = React.useState("");
       const [context, setContext] = React.useState("");
       const [noteStart, setNoteStart] = React.useState("");
@@ -813,11 +815,17 @@ HTML = r"""<!doctype html>
         });
         setTimeout(() => document.querySelector(".line-edit-grid")?.scrollIntoView({block:"nearest", behavior:"smooth"}), 0);
       };
-      const restoreCoherenceChange = change => post("/api/job/line", {
-        job_id:selectedJobId,
-        cue_index:change.cue_index,
-        adapted_english_text:change.before
-      }, () => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob));
+      const restoreCoherenceChange = change => {
+        setRestoreStatus(current => ({...current, [change.cue_index]:"Restoring..."}));
+        api("/api/job/line", {job_id:selectedJobId, cue_index:change.cue_index, adapted_english_text:change.before})
+          .then(() => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(data => {
+            setJob(data);
+            setLine(current => current?.cue_index === change.cue_index ? {...current, adapted_english:change.before} : current);
+            setRestoreStatus(current => ({...current, [change.cue_index]:"Restored"}));
+            setTimeout(() => setRestoreStatus(current => ({...current, [change.cue_index]:""})), 2500);
+          }))
+          .catch(err => { setError(err.message); setRestoreStatus(current => ({...current, [change.cue_index]:"Restore failed"})); });
+      };
       const dropSubtitle = async ev => {
         ev.preventDefault();
         setError("");
@@ -1073,7 +1081,10 @@ HTML = r"""<!doctype html>
                   e("span", {className:"change-time"}, `#${change.cue_index}\n${formatSecondsDisplay(change.start)} - ${formatSecondsDisplay(change.end)}`),
                   e("span", {className:"change-before"}, change.before),
                   e("span", {className:"change-after"}, change.after),
-                  e("button", {className:"secondary", onClick:ev=>{ ev.stopPropagation(); restoreCoherenceChange(change); }}, "Restore before")
+                  e("div", {className:"change-action"},
+                    e("button", {className:"secondary", disabled:restoreStatus[change.cue_index] === "Restoring...", onClick:ev=>{ ev.stopPropagation(); restoreCoherenceChange(change); }}, restoreStatus[change.cue_index] === "Restoring..." ? "Restoring..." : "Restore before"),
+                    restoreStatus[change.cue_index] && restoreStatus[change.cue_index] !== "Restoring..." ? e("span", {className:"tiny"}, restoreStatus[change.cue_index]) : null
+                  )
                 ))) : e("div", {className:"empty"}, "No second-pass changes yet.")
               )
             ),

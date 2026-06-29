@@ -105,6 +105,10 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "selectCoherenceChange" in HTML
     assert "setSelectedCueIndexes([row ? row.cue_index : targetIndex])" in HTML
     assert "has_adapted_english: true" in HTML
+    assert "Restoring..." in HTML
+    assert "Restored" in HTML
+    assert "Restore failed" in HTML
+    assert "change-action" in HTML
     assert "line-edit-grid" in HTML
     assert "/api/job/coherence-pass" in HTML
     assert "Shift-click selects a continuous range" in HTML
