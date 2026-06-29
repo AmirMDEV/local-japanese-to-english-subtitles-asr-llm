@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from local_subtitle_stack.web_ui import HTML, close_other_web_ui_processes, count_completed_outputs, count_sources, format_bytes
+from local_subtitle_stack.web_ui import (
+    HTML,
+    close_other_web_ui_processes,
+    count_completed_outputs,
+    count_sources,
+    format_bytes,
+    ollama_blob_paths,
+    ollama_manifest_path,
+)
 
 
 def test_web_ui_counts_sources_and_completed_outputs(tmp_path: Path) -> None:
@@ -27,6 +35,9 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "max-height: min(34vh, 340px)" in HTML
     assert "/api/models" in HTML
     assert "Ollama storage" in HTML
+    assert "Manifest file" in HTML
+    assert "Stored on" in HTML
+    assert "Blob files" in HTML
     assert "Preview and line editor" in HTML
     assert "Transcription and translation models" in HTML
     assert "Load existing subtitles" in HTML
@@ -57,6 +68,23 @@ def test_web_ui_has_responsive_layout_shell() -> None:
 
 def test_web_ui_formats_model_sizes() -> None:
     assert format_bytes(4_435_931_324) == "4.1 GB"
+
+
+def test_web_ui_resolves_ollama_model_manifest_and_blob_paths(tmp_path: Path) -> None:
+    root = tmp_path / "ollama-models"
+    manifest_path = Path(ollama_manifest_path(str(root), "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e2b"))
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        '{"layers":[{"digest":"sha256:abc123"},{"digest":"sha256:def456"}]}',
+        encoding="utf-8",
+    )
+
+    assert manifest_path == root / "manifests" / "registry.ollama.ai" / "fredrezones55" / "Gemma-4-Uncensored-HauhauCS-Aggressive" / "e2b"
+    assert ollama_blob_paths(str(root), str(manifest_path), "sha256:fallback") == [
+        str(root / "blobs" / "sha256-abc123"),
+        str(root / "blobs" / "sha256-def456"),
+        str(root / "blobs" / "sha256-fallback"),
+    ]
 
 
 def test_web_ui_closes_old_web_processes_only(monkeypatch) -> None:

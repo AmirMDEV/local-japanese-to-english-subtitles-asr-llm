@@ -210,6 +210,23 @@ HTML = r"""<!doctype html>
     }
     .model-row:first-child { border-top: 0; padding-top: 0; }
     .model-row span:first-child { color: var(--muted); font-size: 12px; font-weight: 700; }
+    .model-detail-row {
+      display: grid;
+      gap: 8px;
+      padding: 10px 0;
+      border-top: 1px solid rgba(255,255,255,.06);
+    }
+    .model-detail-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
+    .model-detail-head strong { overflow-wrap: anywhere; }
+    .model-locations {
+      display: grid;
+      gap: 5px;
+      padding: 8px;
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 6px;
+      background: rgba(0,0,0,.12);
+    }
+    .model-locations span { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
     .job-list, .preview-list, .note-list { display: grid; gap: 8px; max-height: min(42vh, 480px); overflow: auto; }
     .preview-list { max-height: min(58vh, 680px); }
     .job-row, .preview-row, .note-row {
@@ -713,7 +730,22 @@ HTML = r"""<!doctype html>
               e("div", {className:"panel-head"}, e("strong", null, "Models"), e("button", {className:"secondary", onClick:refreshModels}, "Refresh")),
               e("div", {className:"panel-body model-list"},
                 e("div", {className:"model-row"}, e("span", null, "Ollama storage"), e("span", {className:"path"}, models.storage || "Unknown"), e("span", null, "")),
-                (models.selected || []).map(item => e("div", {className:"model-row", key:item.label}, e("span", null, item.label), e("span", {className:"path"}, item.name), e("span", null, item.size || "Not installed"))),
+                (models.selected || []).map(item => e("div", {className:"model-detail-row", key:item.label},
+                  e("div", {className:"model-detail-head"},
+                    e("div", null,
+                      e("span", {className:"tiny"}, item.label),
+                      e("strong", {className:"path"}, item.name)
+                    ),
+                    e("strong", null, item.size || "Not installed")
+                  ),
+                  e("div", {className:"model-locations"},
+                    e("span", null, `Stored on: ${models.storage || "Unknown"}`),
+                    e("span", null, `Manifest file: ${item.manifest_path || "Not found"}`),
+                    (item.blob_paths && item.blob_paths.length)
+                      ? item.blob_paths.map((path, index) => e("span", {key:path}, `${index === 0 ? "Blob files" : "Blob file"}: ${path}`))
+                      : e("span", null, "Blob files: Not found")
+                  )
+                )),
                 e("div", {className:"model-row"}, e("span", null, "Japanese cache"), e("span", {className:"path"}, models.hf_cache || "Default Hugging Face cache"), e("span", null, ""))
               )
             ),
@@ -1337,6 +1369,44 @@ def format_bytes(value: int) -> str:
     return f"{value} B"
 
 
+def ollama_manifest_path(storage_root: str, model_name: str) -> str:
+    if storage_root.startswith("Remote Ollama host:"):
+        return ""
+    model, _, tag = model_name.partition(":")
+    tag = tag or "latest"
+    parts = [part for part in model.split("/") if part]
+    if len(parts) == 1:
+        host, namespace, name = "registry.ollama.ai", "library", parts[0]
+    elif len(parts) == 2:
+        host, namespace, name = "registry.ollama.ai", parts[0], parts[1]
+    else:
+        host, namespace, name = parts[0], parts[-2], parts[-1]
+    return str(Path(storage_root) / "manifests" / host / namespace / name / tag)
+
+
+def ollama_blob_path(storage_root: str, digest: str) -> str:
+    if storage_root.startswith("Remote Ollama host:"):
+        return ""
+    if not digest.startswith("sha256:"):
+        return ""
+    return str(Path(storage_root) / "blobs" / digest.replace(":", "-", 1))
+
+
+def ollama_blob_paths(storage_root: str, manifest_path: str, fallback_digest: str) -> list[str]:
+    paths: list[str] = []
+    if manifest_path and Path(manifest_path).exists():
+        try:
+            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        for item in manifest.get("layers", []):
+            path = ollama_blob_path(storage_root, str(item.get("digest") or ""))
+            if path:
+                paths.append(path)
+    fallback = ollama_blob_path(storage_root, fallback_digest)
+    return _unique_strings([path for path in [*paths, fallback] if path])
+
+
 def model_storage_snapshot() -> dict[str, Any]:
     config = APP_STATE.service.config
     ollama = APP_STATE.service.ollama
@@ -1345,13 +1415,18 @@ def model_storage_snapshot() -> dict[str, Any]:
     except Exception:
         details = {}
 
-    def selected(label: str, name: str) -> dict[str, str]:
+    def selected(label: str, name: str) -> dict[str, Any]:
         detail = details.get(name)
         size = detail.get("size") if detail else None
+        digest = str(detail.get("digest") or "") if detail else ""
+        storage = ollama.model_storage_root()
+        manifest_path = ollama_manifest_path(storage, name) if detail else ""
         return {
             "label": label,
             "name": name,
             "size": format_bytes(int(size)) if isinstance(size, int) else "",
+            "manifest_path": manifest_path,
+            "blob_paths": ollama_blob_paths(storage, manifest_path, digest),
         }
 
     return {
