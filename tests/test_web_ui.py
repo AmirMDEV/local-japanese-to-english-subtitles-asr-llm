@@ -36,6 +36,8 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Open direct English in Subtitle Edit" in HTML
     assert "Open review bundle in Subtitle Edit" in HTML
     assert "Add files and start processing" in HTML
+    assert "Context is added to every English translation prompt" in HTML
+    assert "Series or project name" in HTML
     assert "Drop an .srt file here to edit existing subtitles" in HTML
     assert "/api/upload-subtitle" in HTML
     assert "Saved subtitle files" in HTML

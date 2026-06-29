@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Clarified the web context panel so overall context is described as English-translation prompt context, renamed batch label to series/project name, and made scene-note wording time-range specific.
 - Fixed web worker status after restarting the browser UI, auto-selecting newly loaded jobs, closing stale web UI instances on launch, and showing translation progress as soon as a subtitle group starts.
 - Split the selected-job controls so job actions and Subtitle Edit open actions are visibly separate, with every Subtitle Edit button labeled by destination.
 - Fixed the web Jobs panel so completed jobs say saved, stale jobs load without `Failed to fetch`, and jobs can be deleted from the queue list without deleting exported subtitle files.
