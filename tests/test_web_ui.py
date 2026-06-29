@@ -132,6 +132,8 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Run second-pass coherence review" in HTML
     assert "Second-pass coherence review progress" in HTML
     assert "Running step progress" in HTML
+    assert "job-progress" in HTML
+    assert "Overall progress for ${row.source}" in HTML
     assert "stage_progress_message" in HTML
     assert "progress_age_seconds" in HTML
     assert "Likely active" in HTML

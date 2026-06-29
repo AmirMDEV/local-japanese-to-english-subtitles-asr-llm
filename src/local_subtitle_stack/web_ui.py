@@ -340,6 +340,10 @@ HTML = r"""<!doctype html>
       border-radius: 0;
       box-shadow: none;
     }
+    .job-progress {
+      height: 8px;
+      margin-top: 2px;
+    }
     .job-delete {
       width: 32px;
       min-width: 32px;
@@ -612,6 +616,7 @@ HTML = r"""<!doctype html>
       return stageLabel(row?.stage);
     };
     const progressPercent = row => Math.max(0, Math.min(100, Number(row?.stage_progress_percent || row?.overall_progress_percent || 0)));
+    const overallProgressPercent = row => Math.max(0, Math.min(100, Number(row?.overall_progress_percent || 0)));
     const hasLiveProgress = row => Boolean(row && row.stage_progress_message);
     const progressAgeSeconds = row => Number(row?.progress_age_seconds || 0);
       const progressAgeLabel = row => row?.progress_age_text ? `${row.progress_age_text} ago` : "No progress timestamp";
@@ -1020,7 +1025,8 @@ HTML = r"""<!doctype html>
                 e("span", {className:"tiny"}, `${row.stop_requested === "true" ? "stopping" : row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
                 progressHealth(row) ? e("span", {className:"tiny"}, progressHealth(row)) : null,
                 row.status === "working" && workerResourceText(status.worker_resources) ? e("span", {className:"tiny"}, workerResourceText(status.worker_resources)) : null,
-                e("span", null, jobStepText(row))
+                e("span", null, jobStepText(row)),
+                row.status === "working" ? e("progress", {className:"job-progress", max:"100", value:overallProgressPercent(row), "aria-label":`Overall progress for ${row.source}`}) : null
               ),
               canStopJob(row) ? e("button", {className:"job-delete", title:"Stop this job after current safe step", "aria-label":`Stop ${row.source} after current safe step`, onClick:()=>stopJob(row.job_id)}, "Stop") : null,
               e("button", {className:"job-delete", title:"Remove job from list", "aria-label":`Remove ${row.source} from job list`, disabled:row.status === "working", onClick:()=>deleteJob(row.job_id)}, "X")
