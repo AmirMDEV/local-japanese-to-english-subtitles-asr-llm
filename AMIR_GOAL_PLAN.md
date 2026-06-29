@@ -26,7 +26,7 @@ Make the web UI identify as Fast Multilanguage Transcriber and bring it to pract
 | 3 | passed | Add web controls for queue, worker, import, health, model settings | 2 | API smoke + tests | 1/3 | Controls render in screenshot and route to service endpoints |
 | 4 | passed | Add selected job preview, line edit, notes, rebuild/open actions | 2 | API smoke + tests | 1/3 | Controls render in screenshot and route to service endpoints |
 | 5 | passed | Responsive UI polish and visual verification | 3,4 | desktop/mobile screenshots | 1/3 | Desktop/mobile no overflow/clipping |
-| 6 | active | Final tests, changelog, commit, push | 5 | pytest + git clean | 1/3 | |
+| 6 | passed | Final tests, changelog, commit, push | 5 | pytest + git clean | 1/3 | `88 passed`; commit `3393886` pushed |
 
 ## Subagent Plan
 | Subagent | Purpose | Scope | Return format | Status |
@@ -37,6 +37,7 @@ Make the web UI identify as Fast Multilanguage Transcriber and bring it to pract
 - Stage 1 attempt 1: Loaded `amir-pursue-goal`, audited Tk button commands, service methods, current web routes. CodeGraph unavailable because project index missing.
 - Stage 2 attempt 1: Chosen route is shared `WorkerService`, not duplicate web worker logic.
 - Stages 2-5 attempt 1: Added service-backed web endpoints and React panels for queue, jobs, preview/editor, notes/rebuilds, models, settings, imports, health. API smoke passed. Desktop/mobile screenshots inspected; no overflow/clipping.
+- Stage 6 attempt 1: `pytest` passed, changes committed and pushed.
 
 ## Blockers
 | Stage | Blocker | Evidence | Tried | What would unblock |
