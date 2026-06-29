@@ -1116,6 +1116,19 @@ def test_import_existing_reuses_matching_job_instead_of_duplicating(
     assert [row["job_id"] for row in rows] == [first.job_id]
 
 
+def test_queued_video_status_says_waiting_to_start(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "queued-video.mp4"
+    source.write_text("video", encoding="utf-8")
+    service.enqueue(source, profile="default")
+
+    row = service.status_rows()[0]
+
+    assert row["status"] == "queued"
+    assert row["step_text"] == "Waiting to start. Press Start processing all jobs."
+
+
 def test_status_rows_include_stage_and_overall_progress(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     patch_runtime(monkeypatch)
     service = build_service(tmp_path, SuccessfulOllama())

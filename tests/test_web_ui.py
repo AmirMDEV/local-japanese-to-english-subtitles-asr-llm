@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from local_subtitle_stack.web_ui import HTML, count_completed_outputs, count_sources, format_bytes
+from local_subtitle_stack.web_ui import HTML, close_other_web_ui_processes, count_completed_outputs, count_sources, format_bytes
 
 
 def test_web_ui_counts_sources_and_completed_outputs(tmp_path: Path) -> None:
@@ -41,7 +41,42 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "Saved subtitle files" in HTML
     assert "Delete job from list" in HTML
     assert "/api/job/delete" in HTML
+    assert "selectNewJob" in HTML
 
 
 def test_web_ui_formats_model_sizes() -> None:
     assert format_bytes(4_435_931_324) == "4.1 GB"
+
+
+def test_web_ui_closes_old_web_processes_only(monkeypatch) -> None:
+    class FakeProcess:
+        def __init__(self, pid: int, command: list[str]) -> None:
+            self.pid = pid
+            self.info = {"pid": pid, "cmdline": command}
+            self.terminated = False
+            self.killed = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self.killed = True
+
+    current = FakeProcess(10, ["python", "-m", "local_subtitle_stack", "web-ui"])
+    parent = FakeProcess(9, ["python", "-m", "local_subtitle_stack", "web-ui"])
+    old_web = FakeProcess(11, ["python", "-m", "local_subtitle_stack.cli", "web-ui", "--port", "8767"])
+    worker = FakeProcess(12, ["python", "-m", "local_subtitle_stack.cli", "worker"])
+    other = FakeProcess(13, ["python", "-m", "other_app", "web-ui"])
+
+    monkeypatch.setattr("local_subtitle_stack.web_ui.os.getpid", lambda: 10)
+    monkeypatch.setattr("local_subtitle_stack.web_ui.psutil.Process", lambda _pid: type("Current", (), {"parents": lambda _self: [parent]})())
+    monkeypatch.setattr("local_subtitle_stack.web_ui.psutil.process_iter", lambda _attrs: [parent, current, old_web, worker, other])
+    monkeypatch.setattr("local_subtitle_stack.web_ui.psutil.wait_procs", lambda processes, timeout: (processes, []))
+
+    close_other_web_ui_processes()
+
+    assert old_web.terminated is True
+    assert worker.terminated is False
+    assert other.terminated is False
+    assert current.terminated is False
+    assert parent.terminated is False

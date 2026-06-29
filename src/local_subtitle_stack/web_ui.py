@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+import psutil
+
 from .app import build_service
 from .asr_models import ranked_asr_candidates
 from .config import CachePaths, ModelConfig, load_config, save_config
@@ -413,8 +415,14 @@ HTML = r"""<!doctype html>
         setError("");
       };
       const post = (path, body, after=refresh) => { setError(""); return api(path, body).then(data => { after && after(data); refreshModels(); return data; }).catch(err => setError(err.message)); };
-      const enqueueAndStart = () => post("/api/start", {targets, profile, recursive, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast, batch_label:batchLabel, context, scene_contexts:notes}, setStatus);
-      const enqueueOnly = () => post("/api/enqueue", {targets, profile, recursive, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast, batch_label:batchLabel, context, scene_contexts:notes});
+      const selectNewJob = data => {
+        if (data?.jobs) setStatus(data);
+        const jobId = data?.queued?.[0] || data?.job_id || "";
+        if (jobId) setSelectedJobId(jobId);
+        refresh();
+      };
+      const enqueueAndStart = () => post("/api/start", {targets, profile, recursive, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast, batch_label:batchLabel, context, scene_contexts:notes}, selectNewJob);
+      const enqueueOnly = () => post("/api/enqueue", {targets, profile, recursive, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast, batch_label:batchLabel, context, scene_contexts:notes}, selectNewJob);
       const addNote = () => {
         if (!noteStart || !noteEnd || !noteText.trim()) return;
         setNotes(current => current.concat({start_seconds:timeToSeconds(noteStart), end_seconds:timeToSeconds(noteEnd), notes:noteText.trim()}));
@@ -440,7 +448,7 @@ HTML = r"""<!doctype html>
         adapted_english_text:line.has_adapted_english ? line.adapted_english : null,
         reference_text:line.has_reference ? line.reference : null
       }, () => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob));
-      const importExisting = () => post("/api/import-existing", {profile, ...importDraft, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
+      const importExisting = () => post("/api/import-existing", {profile, ...importDraft, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast}, selectNewJob);
       const saveSettings = () => settingsDraft && post("/api/settings/save", settingsDraft, data => setSettingsDraft(data));
       const chooseSubtitle = key => api("/api/pick-subtitle").then(d => d.path && setImportDraft(current => ({...current, [key]:d.path}))).catch(err => setError(err.message));
       const chooseCacheFolder = () => api("/api/pick-folder").then(d => d.path && setSettingsDraft(current => ({...current, cache_paths:{...current.cache_paths, hf_hub_cache:d.path}}))).catch(err => setError(err.message));
@@ -911,7 +919,7 @@ class WebServiceState:
             return {
                 "jobs": self.service.status_rows(),
                 "pause_requested": self.service.store.pause_requested(),
-                "worker_running": self._running(self.worker_process),
+                "worker_running": self.worker_pid() is not None,
                 "rebuild_running": self._running(self.rebuild_process),
                 "rebuild_log": self.rebuild_log[-6000:],
                 "settings": self.settings(),
@@ -1039,8 +1047,9 @@ class WebServiceState:
 
     def start_worker(self) -> dict[str, Any]:
         self.service.store.set_pause(False)
-        if self._running(self.worker_process):
-            return {"message": "Worker already running", "pid": self.worker_process.pid}
+        pid = self.worker_pid()
+        if pid:
+            return {"message": "Worker already running", "pid": pid}
         self.worker_process = subprocess.Popen(
             [sys.executable, "-m", "local_subtitle_stack.cli", "worker"],
             stdout=subprocess.DEVNULL,
@@ -1049,6 +1058,14 @@ class WebServiceState:
             creationflags=no_window_creationflags(),
         )
         return {"message": "Worker started", "pid": self.worker_process.pid}
+
+    def worker_pid(self) -> int | None:
+        pid = self.service.store.active_worker_pid()
+        if pid:
+            return pid
+        if self._running(self.worker_process):
+            return self.worker_process.pid
+        return None
 
     def stop_worker(self) -> dict[str, Any]:
         self.service.store.set_pause(True)
@@ -1292,6 +1309,30 @@ def model_storage_snapshot() -> dict[str, Any]:
     }
 
 
+def close_other_web_ui_processes() -> None:
+    current_pid = os.getpid()
+    parent_pids = {process.pid for process in psutil.Process(current_pid).parents()}
+    old_processes = []
+    for process in psutil.process_iter(["pid", "cmdline"]):
+        pid = process.info.get("pid")
+        if pid == current_pid or pid in parent_pids:
+            continue
+        command = " ".join(process.info.get("cmdline") or [])
+        if "local_subtitle_stack" not in command or "web-ui" not in command:
+            continue
+        try:
+            process.terminate()
+            old_processes.append(process)
+        except psutil.Error:
+            continue
+    _, alive = psutil.wait_procs(old_processes, timeout=2)
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.Error:
+            continue
+
+
 def _run_windows_picker(script: str) -> list[str]:
     completed = subprocess.run(
         ["powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script],
@@ -1470,6 +1511,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main(argv: list[str] | None = None) -> int:
     port = int(argv[0]) if argv else int(os.environ.get("FAST_TRANSCRIBER_PORT", "8765"))
+    close_other_web_ui_processes()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = f"http://127.0.0.1:{port}/"
     print(f"Fast Transcriber UI: {url}")

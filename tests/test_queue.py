@@ -109,3 +109,22 @@ def test_resume_completed_job_raises(tmp_path: Path) -> None:
 
     with pytest.raises(QueueError):
         store.resume_job(manifest.job_id)
+
+
+def test_active_worker_pid_reuses_lock_check(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = build_config(tmp_path)
+    store = QueueStore(config)
+    store.lock_path.write_text('{"pid": 12345}', encoding="utf-8")
+    monkeypatch.setattr("local_subtitle_stack.queue.psutil.pid_exists", lambda pid: pid == 12345)
+
+    assert store.active_worker_pid() == 12345
+
+
+def test_active_worker_pid_clears_stale_lock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    config = build_config(tmp_path)
+    store = QueueStore(config)
+    store.lock_path.write_text('{"pid": 12345}', encoding="utf-8")
+    monkeypatch.setattr("local_subtitle_stack.queue.psutil.pid_exists", lambda _pid: False)
+
+    assert store.active_worker_pid() is None
+    assert not store.lock_path.exists()

@@ -17,6 +17,7 @@ from .config import AppConfig
 from .asr_models import REAZON_K2_ENGINE, REAZON_K2_MODEL_ID
 from .domain import (
     JOB_STATUS_COMPLETED,
+    JOB_STATUS_QUEUED,
     JOB_STATUS_WORKING,
     STAGE_ADAPTED,
     STAGE_EXTRACT,
@@ -381,7 +382,7 @@ class WorkerService:
                     "state_dir": state,
                     "status": manifest.status,
                     "stage": manifest.current_stage,
-                    "step_text": self._stage_display_text(manifest),
+                    "step_text": "Waiting to start. Press Start processing all jobs." if manifest.status == JOB_STATUS_QUEUED else self._stage_display_text(manifest),
                     "source": manifest.source_name,
                     "updated_at": manifest.updated_at,
                     "stage_progress_percent": f"{self._current_stage_percent(manifest):.2f}",
@@ -1654,6 +1655,15 @@ class WorkerService:
             group = groups[group_index]
             try:
                 group_start_index = group_index * group_size
+                self._set_stage_progress(
+                    manifest,
+                    stage=stage_name,
+                    current=float(group_index) + 0.1,
+                    total=float(total_groups),
+                    unit="groups",
+                    message=f"Working on subtitle group {group_index + 1} of {total_groups}",
+                )
+                self._save_progress(job_dir, manifest, force=True)
                 translations, recovery_note = self._translate_group_with_backoff(
                     manifest=manifest,
                     stage_name=stage_name,

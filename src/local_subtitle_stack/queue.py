@@ -66,14 +66,21 @@ class QueueStore:
         else:
             self.pause_path.unlink(missing_ok=True)
 
+    def active_worker_pid(self) -> int | None:
+        if not self.lock_path.exists():
+            return None
+        data = read_json(self.lock_path, default={}) or {}
+        pid = int(data.get("pid", 0) or 0)
+        if pid and psutil.pid_exists(pid):
+            return pid
+        self.lock_path.unlink(missing_ok=True)
+        return None
+
     @contextmanager
     def acquire_worker_lock(self) -> Iterator[None]:
-        if self.lock_path.exists():
-            data = read_json(self.lock_path, default={}) or {}
-            pid = int(data.get("pid", 0) or 0)
-            if pid and psutil.pid_exists(pid):
-                raise QueueError(f"Worker already running with pid {pid}.")
-            self.lock_path.unlink(missing_ok=True)
+        pid = self.active_worker_pid()
+        if pid:
+            raise QueueError(f"Worker already running with pid {pid}.")
 
         atomic_write_json(self.lock_path, {"pid": os.getpid(), "created_at": now_iso()})
         try:

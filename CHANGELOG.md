@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Fixed web worker status after restarting the browser UI, auto-selecting newly loaded jobs, closing stale web UI instances on launch, and showing translation progress as soon as a subtitle group starts.
 - Split the selected-job controls so job actions and Subtitle Edit open actions are visibly separate, with every Subtitle Edit button labeled by destination.
 - Fixed the web Jobs panel so completed jobs say saved, stale jobs load without `Failed to fetch`, and jobs can be deleted from the queue list without deleting exported subtitle files.
 - Added drag-and-drop `.srt` import in the web preview editor so existing subtitles can be uploaded into a new job or attached to the selected job.
