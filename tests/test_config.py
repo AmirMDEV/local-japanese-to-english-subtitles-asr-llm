@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from local_subtitle_stack.config import AppConfig, ModelConfig, load_config, save_config, default_profiles
+from local_subtitle_stack.config import (
+    DEFAULT_TRANSLATION_MODEL,
+    AppConfig,
+    ModelConfig,
+    default_profiles,
+    load_config,
+    save_config,
+)
 
 
 def test_translation_floor_is_not_higher_than_asr_floor() -> None:
@@ -18,6 +25,12 @@ def test_default_profile_is_conservative() -> None:
 
 def test_default_kotoba_model_uses_v22() -> None:
     assert ModelConfig().asr == "kotoba-tech/kotoba-whisper-v2.2"
+
+
+def test_default_translation_models_use_gemma_uncensored() -> None:
+    defaults = ModelConfig()
+    assert defaults.literal_translation == DEFAULT_TRANSLATION_MODEL
+    assert defaults.adapted_translation == DEFAULT_TRANSLATION_MODEL
 
 
 def test_load_config_falls_back_to_legacy_path(tmp_path: Path, monkeypatch) -> None:

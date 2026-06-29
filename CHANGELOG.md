@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Changed built-in translation defaults to Gemma 4 Uncensored for both direct and context-applied English so reset/new configs do not fall back to Qwen.
 - Added an always-visible progress bar to running job cards so live progress still appears when another completed job is selected.
 - Added live worker CPU, RAM, GPU, and VRAM readouts beside the frozen-progress hints in the web UI.
 - Added live progress-age hints in the web job list and running progress card, showing likely active, watch, or possible stuck based on last saved progress.

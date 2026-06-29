@@ -19,6 +19,7 @@ DEFAULT_CONFIG_DIR = LOCAL_APPDATA_ROOT / "SubtitleTool"
 DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.toml"
 LEGACY_CONFIG_DIR = LOCAL_APPDATA_ROOT / "LocalSubtitleStack"
 LEGACY_CONFIG_PATH = LEGACY_CONFIG_DIR / "config.toml"
+DEFAULT_TRANSLATION_MODEL = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e2b"
 
 
 @dataclass(slots=True)
@@ -40,8 +41,8 @@ class ModelConfig:
     asr_engine: str = "kotoba"
     asr: str = "kotoba-tech/kotoba-whisper-v2.2"
     faster_whisper_profile: str = "auto"
-    literal_translation: str = "qwen3:4b-q8_0"
-    adapted_translation: str = "qwen3:4b-q8_0"
+    literal_translation: str = DEFAULT_TRANSLATION_MODEL
+    adapted_translation: str = DEFAULT_TRANSLATION_MODEL
 
 
 @dataclass(slots=True)
