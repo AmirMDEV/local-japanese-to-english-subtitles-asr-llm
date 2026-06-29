@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Renamed the web UI to Fast Multilanguage Transcriber and added queue, job preview, line editing, notes, rebuild, import, health, and model-settings controls that mirror the Python UI workflows.
 - Added model storage visibility for Ollama host/root, selected English model sizes, and the Japanese model cache folder.
 - Reworked the local web UI into a responsive two-panel layout with stable scroll regions and resize-friendly controls.
 - Added Ollama model dropdowns, refresh, and a one-click download/select path for `fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e2b`.

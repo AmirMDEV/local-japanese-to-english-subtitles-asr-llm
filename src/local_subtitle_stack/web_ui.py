@@ -6,14 +6,20 @@ import subprocess
 import sys
 import threading
 import webbrowser
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from .config import load_config
+from .app import build_service
+from .config import CachePaths, ModelConfig, load_config, save_config
+from .domain import SceneContextBlock
 from .integrations import OllamaClient
+from .queue import QueueError
 from .utils import VIDEO_EXTENSIONS, no_window_creationflags
+
+RECOMMENDED_TRANSLATION_MODEL = "fredrezones55/Gemma-4-Uncensored-HauhauCS-Aggressive:e2b"
 
 
 HTML = r"""<!doctype html>
@@ -21,7 +27,7 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Fast Transcriber</title>
+  <title>Fast Multilanguage Transcriber</title>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <style>
@@ -189,6 +195,30 @@ HTML = r"""<!doctype html>
     }
     .model-row:first-child { border-top: 0; padding-top: 0; }
     .model-row span:first-child { color: var(--muted); font-size: 12px; font-weight: 700; }
+    .job-list, .preview-list, .note-list { display: grid; gap: 8px; max-height: min(42vh, 480px); overflow: auto; }
+    .job-row, .preview-row, .note-row {
+      width: 100%;
+      text-align: left;
+      display: grid;
+      gap: 4px;
+      background: rgba(0,0,0,.14);
+      color: var(--soft);
+      border-color: rgba(255,255,255,.08);
+      white-space: normal;
+    }
+    .job-row.active, .preview-row.active { border-color: var(--accent); }
+    textarea {
+      min-height: 90px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: rgba(255,255,255,.05);
+      color: var(--soft);
+      padding: 9px 10px;
+      resize: vertical;
+      font: inherit;
+    }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .tiny { color: var(--muted); font-size: 12px; }
     progress { width: 100%; height: 18px; accent-color: var(--accent); margin-top: 14px; }
     pre {
       white-space: pre-wrap;
@@ -227,6 +257,7 @@ HTML = r"""<!doctype html>
       .button-row button, .button-row select { flex: 1 1 150px; }
       .status-grid { grid-template-columns: 1fr; }
       .model-row { grid-template-columns: 1fr; gap: 4px; }
+      .two-col { grid-template-columns: 1fr; }
       pre { min-height: 180px; }
     }
   </style>
@@ -247,16 +278,42 @@ HTML = r"""<!doctype html>
 
     function App() {
       const [targets, setTargets] = React.useState([]);
-      const [profile, setProfile] = React.useState("low_gpu");
+      const [profile, setProfile] = React.useState("conservative");
       const [recursive, setRecursive] = React.useState(true);
-      const [status, setStatus] = React.useState({running:false, completed:0, total:0, log:""});
+      const [includeAdapted, setIncludeAdapted] = React.useState(true);
+      const [preferFast, setPreferFast] = React.useState(false);
+      const [status, setStatus] = React.useState({jobs:[], settings:{profiles:["conservative"]}});
       const [models, setModels] = React.useState({storage:"", hf_cache:"", selected:[]});
       const [error, setError] = React.useState("");
       const [manualPath, setManualPath] = React.useState("");
+      const [selectedJobId, setSelectedJobId] = React.useState("");
+      const [job, setJob] = React.useState(null);
+      const [line, setLine] = React.useState(null);
+      const [batchLabel, setBatchLabel] = React.useState("");
+      const [context, setContext] = React.useState("");
+      const [noteStart, setNoteStart] = React.useState("");
+      const [noteEnd, setNoteEnd] = React.useState("");
+      const [noteText, setNoteText] = React.useState("");
+      const [notes, setNotes] = React.useState([]);
+      const [importDraft, setImportDraft] = React.useState({video:"", primary_subtitle:"", japanese:"", direct:"", easy:"", reference:""});
+      const [settingsDraft, setSettingsDraft] = React.useState(null);
+      const [health, setHealth] = React.useState(null);
 
-      const refresh = () => api("/api/status").then(setStatus).catch(err => setError(err.message));
+      const refresh = () => api("/api/status").then(data => { setStatus(data); if (!settingsDraft) setSettingsDraft(data.settings); }).catch(err => setError(err.message));
       const refreshModels = () => api("/api/models").then(setModels).catch(err => setError(err.message));
       React.useEffect(() => { refresh(); refreshModels(); const id = setInterval(refresh, 1500); return () => clearInterval(id); }, []);
+      React.useEffect(() => {
+        if (!selectedJobId) return;
+        api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(data => {
+          setJob(data);
+          const manifest = data.manifest || {};
+          setBatchLabel(manifest.series || "");
+          setContext(manifest.job_context || "");
+          setNotes(manifest.scene_contexts || []);
+          setIncludeAdapted(manifest.include_adapted_english !== false);
+          setPreferFast(Boolean(manifest.prefer_fast_translation));
+        }).catch(err => setError(err.message));
+      }, [selectedJobId]);
 
       const pickFolder = () => { setError(""); api("/api/pick-folder").then(d => d.path && setTargets([d.path])).catch(err => setError(err.message)); };
       const pickFiles = () => { setError(""); api("/api/pick-files").then(d => d.paths?.length && setTargets(d.paths)).catch(err => setError(err.message)); };
@@ -267,24 +324,41 @@ HTML = r"""<!doctype html>
         setManualPath("");
         setError("");
       };
-      const start = () => { setError(""); api("/api/start", {targets, profile, recursive}).then(setStatus).catch(err => setError(err.message)); };
-      const cancel = () => { setError(""); api("/api/cancel", {}).then(setStatus).catch(err => setError(err.message)); };
-      const pct = status.total ? Math.round(status.completed / status.total * 100) : 0;
-      const runningText = status.running ? "Running" : (status.state || "Idle");
+      const post = (path, body, after=refresh) => { setError(""); return api(path, body).then(data => { after && after(data); refreshModels(); return data; }).catch(err => setError(err.message)); };
+      const enqueueAndStart = () => post("/api/start", {targets, profile, recursive, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast, batch_label:batchLabel, context, scene_contexts:notes}, setStatus);
+      const enqueueOnly = () => post("/api/enqueue", {targets, profile, recursive, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast, batch_label:batchLabel, context, scene_contexts:notes});
+      const addNote = () => {
+        if (!noteStart || !noteEnd || !noteText.trim()) return;
+        setNotes(current => current.concat({start_seconds:Number(noteStart), end_seconds:Number(noteEnd), notes:noteText.trim()}));
+        setNoteStart(""); setNoteEnd(""); setNoteText("");
+      };
+      const saveNotes = () => selectedJobId && post("/api/job/notes", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
+      const saveLine = () => line && selectedJobId && post("/api/job/line", {
+        job_id:selectedJobId,
+        cue_index:line.cue_index,
+        japanese_text:line.has_japanese ? line.japanese : null,
+        literal_english_text:line.has_literal_english ? line.literal_english : null,
+        adapted_english_text:line.has_adapted_english ? line.adapted_english : null,
+        reference_text:line.has_reference ? line.reference : null
+      }, () => api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob));
+      const importExisting = () => post("/api/import-existing", {profile, ...importDraft, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
+      const saveSettings = () => settingsDraft && post("/api/settings/save", settingsDraft, data => setSettingsDraft(data));
+      const jobs = status.jobs || [];
+      const selectedRow = jobs.find(row => row.job_id === selectedJobId);
 
       return e(React.Fragment, null,
         e("header", {className:"topbar"},
-          e("div", null, e("h1", null, "Fast Transcriber"), e("p", null, "Local folder and file transcription using the existing adaptive runner.")),
+          e("div", null, e("h1", null, "Fast Multilanguage Transcriber"), e("p", null, "Local folder and file transcription using the existing adaptive runner.")),
           e("div", {className:"button-row"},
             e("button", {className:"secondary", onClick:refresh}, "Refresh"),
-            e("button", {onClick:start, disabled:status.running || !targets.length}, "Start"),
-            e("button", {className:"danger", onClick:cancel, disabled:!status.running}, "Cancel")
+            e("button", {onClick:()=>post("/api/worker/start", {})}, "Start queue"),
+            e("button", {className:"danger", onClick:()=>post("/api/worker/stop", {})}, "Stop safely")
           )
         ),
         e("div", {className:"layout"},
           e("div", {className:"stack"},
             e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Inputs"), e("span", null, `${targets.length} selected`)),
+              e("div", {className:"panel-head"}, e("strong", null, "Queue inputs"), e("span", null, `${targets.length} selected`)),
               e("div", {className:"panel-body stack"},
                 e("div", {className:"controls"},
                   e("div", {className:"field control-span-12"},
@@ -296,36 +370,94 @@ HTML = r"""<!doctype html>
                   e("button", {className:"secondary control-span-4", onClick:addManual, disabled:status.running || !manualPath.trim()}, "Add path"),
                   e("div", {className:"field control-span-6"},
                     e("label", null, "Profile"),
-                    e("select", {value:profile, onChange:ev=>setProfile(ev.target.value), disabled:status.running},
-                      ["auto","high","balanced","low_gpu","cpu_fallback"].map(v => e("option", {key:v, value:v}, v))
+                    e("select", {value:profile, onChange:ev=>setProfile(ev.target.value)},
+                      ((status.settings && status.settings.profiles) || ["conservative"]).map(v => e("option", {key:v, value:v}, v))
                     )
                   ),
                   e("label", {className:"check-label control-span-6"},
-                    e("input", {type:"checkbox", checked:recursive, onChange:ev=>setRecursive(ev.target.checked), disabled:status.running}),
+                    e("input", {type:"checkbox", checked:recursive, onChange:ev=>setRecursive(ev.target.checked)}),
                     "Search subfolders"
+                  ),
+                  e("label", {className:"check-label control-span-6"},
+                    e("input", {type:"checkbox", checked:includeAdapted, onChange:ev=>setIncludeAdapted(ev.target.checked)}),
+                    "Easy English"
+                  ),
+                  e("label", {className:"check-label control-span-6"},
+                    e("input", {type:"checkbox", checked:preferFast, onChange:ev=>setPreferFast(ev.target.checked)}),
+                    "Fast translation"
                   )
                 ),
                 e("div", {className:"button-row"},
-                  e("button", {className:"secondary", onClick:()=>setTargets([]), disabled:status.running || !targets.length}, "Clear selected paths")
+                  e("button", {onClick:enqueueAndStart, disabled:!targets.length}, "Queue and start"),
+                  e("button", {className:"secondary", onClick:enqueueOnly, disabled:!targets.length}, "Queue only"),
+                  e("button", {className:"secondary", onClick:()=>setTargets([]), disabled:!targets.length}, "Clear")
                 ),
                 targets.length
                   ? e("div", {className:"target-list"}, targets.map((path, index) => e("div", {className:"item", key:path}, e("span", null, `Source ${index + 1}`), e("span", {className:"path"}, path))))
                   : e("div", {className:"empty"}, "Select a folder, select files, or paste a path.")
               )
             ),
+            e("section", {className:"panel"},
+              e("div", {className:"panel-head"}, e("strong", null, "Jobs"), e("span", null, status.worker_running ? "Running" : (status.pause_requested ? "Stopping" : "Idle"))),
+              e("div", {className:"panel-body job-list"},
+                jobs.length ? jobs.map(row => e("button", {key:row.job_id, className:`job-row ${row.job_id===selectedJobId?"active":""}`, onClick:()=>setSelectedJobId(row.job_id)},
+                  e("strong", null, row.source),
+                  e("span", {className:"tiny"}, `${row.status} | ${row.stage} | ${row.overall_progress_percent || 0}%`),
+                  e("span", null, row.step_text || "")
+                )) : e("div", {className:"empty"}, "No jobs yet.")
+              )
+            ),
             error ? e("section", {className:"panel error"}, e("div", {className:"panel-head"}, e("strong", null, "Error")), e("div", {className:"panel-body"}, e("p", null, error))) : null
           ),
           e("div", {className:"stack"},
             e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Run status"), e("span", null, runningText)),
-              e("div", {className:"panel-body"},
-                e("div", {className:"status-grid"},
-                  e("div", {className:"metric"}, e("span", null, "Progress"), e("strong", null, `${pct}%`)),
-                  e("div", {className:"metric"}, e("span", null, "Completed"), e("strong", null, status.completed || 0)),
-                  e("div", {className:"metric"}, e("span", null, "Total"), e("strong", null, status.total || 0))
+              e("div", {className:"panel-head"}, e("strong", null, "Selected job"), e("span", null, selectedRow ? selectedRow.status : "None")),
+              e("div", {className:"panel-body stack"},
+                selectedRow ? e("div", {className:"status-grid"},
+                  e("div", {className:"metric"}, e("span", null, "Stage"), e("strong", null, selectedRow.stage || "-")),
+                  e("div", {className:"metric"}, e("span", null, "Progress"), e("strong", null, `${selectedRow.overall_progress_percent || 0}%`)),
+                  e("div", {className:"metric"}, e("span", null, "Model"), e("strong", null, selectedRow.current_model || "-"))
+                ) : e("div", {className:"empty"}, "Select a job."),
+                e("div", {className:"button-row"},
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/job/retry", {job_id:selectedJobId})}, "Retry"),
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"folder"})}, "Open folder"),
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:"review"})}, "Subtitle Edit")
                 ),
-                e("progress", {value:status.completed || 0, max:status.total || 1}),
-                status.current ? e("p", {className:"path"}, status.current) : e("p", null, "No active file.")
+                e("div", {className:"button-row"},
+                  ["ja","direct","easy","direct-partial","easy-partial"].map(kind => e("button", {key:kind, className:"secondary", disabled:!selectedJobId, onClick:()=>post("/api/open", {job_id:selectedJobId, action:kind})}, kind))
+                )
+              )
+            ),
+            e("section", {className:"panel"},
+              e("div", {className:"panel-head"}, e("strong", null, "Preview and line editor"), e("button", {className:"secondary", disabled:!selectedJobId, onClick:()=>api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(setJob)}, "Reload")),
+              e("div", {className:"panel-body stack"},
+                e("div", {className:"preview-list"}, job && job.preview && job.preview.length ? job.preview.map(row => e("button", {key:row.cue_index, className:`preview-row ${line && line.cue_index===row.cue_index?"active":""}`, onClick:()=>setLine({...row})},
+                  e("strong", null, `#${row.cue_index} ${row.start}s-${row.end}s`),
+                  e("span", null, row.japanese || row.literal_english || row.adapted_english || row.reference || "")
+                )) : e("div", {className:"empty"}, "No subtitle lines loaded.")),
+                line ? e("div", {className:"stack"},
+                  e("textarea", {value:line.japanese || "", onChange:ev=>setLine({...line, japanese:ev.target.value}), placeholder:"Japanese"}),
+                  e("textarea", {value:line.literal_english || "", onChange:ev=>setLine({...line, literal_english:ev.target.value}), placeholder:"Direct English"}),
+                  e("textarea", {value:line.adapted_english || "", onChange:ev=>setLine({...line, adapted_english:ev.target.value}), placeholder:"Easy English"}),
+                  e("textarea", {value:line.reference || "", onChange:ev=>setLine({...line, reference:ev.target.value}), placeholder:"Reference"}),
+                  e("button", {onClick:saveLine}, "Save line")
+                ) : null
+              )
+            ),
+            e("section", {className:"panel"},
+              e("div", {className:"panel-head"}, e("strong", null, "Notes and rebuilds"), e("span", null, status.rebuild_running ? "Running" : "Idle")),
+              e("div", {className:"panel-body stack"},
+                e("input", {value:batchLabel, onChange:ev=>setBatchLabel(ev.target.value), placeholder:"Batch label"}),
+                e("textarea", {value:context, onChange:ev=>setContext(ev.target.value), placeholder:"Overall context"}),
+                e("div", {className:"two-col"}, e("input", {value:noteStart, onChange:ev=>setNoteStart(ev.target.value), placeholder:"Start seconds"}), e("input", {value:noteEnd, onChange:ev=>setNoteEnd(ev.target.value), placeholder:"End seconds"})),
+                e("textarea", {value:noteText, onChange:ev=>setNoteText(ev.target.value), placeholder:"Scene note"}),
+                e("div", {className:"button-row"},
+                  e("button", {className:"secondary", onClick:addNote}, "Add note"),
+                  e("button", {className:"secondary", disabled:!selectedJobId, onClick:saveNotes}, "Save notes"),
+                  e("button", {disabled:!selectedJobId, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Redo English"),
+                  e("button", {disabled:!selectedJobId || !noteStart || !noteEnd, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, start_timecode:noteStart, end_timecode:noteEnd, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Redo range")
+                ),
+                e("div", {className:"note-list"}, notes.map((item, index) => e("div", {className:"note-row", key:index}, e("strong", null, `${item.start_seconds}-${item.end_seconds}`), e("span", null, item.notes))))
               )
             ),
             e("section", {className:"panel"},
@@ -337,8 +469,32 @@ HTML = r"""<!doctype html>
               )
             ),
             e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Log"), e("span", null, status.running ? "Live" : "Idle")),
-              e("pre", null, status.log || "Run output appears here.")
+              e("div", {className:"panel-head"}, e("strong", null, "Model settings"), e("span", null, "App-wide")),
+              e("div", {className:"panel-body stack"},
+                settingsDraft ? ["asr_engine","faster_whisper_profile","asr","literal_translation","adapted_translation"].map(key => e("input", {key, value:settingsDraft.models?.[key] || "", onChange:ev=>setSettingsDraft({...settingsDraft, models:{...settingsDraft.models, [key]:ev.target.value}}), placeholder:key})) : null,
+                settingsDraft ? e("input", {value:settingsDraft.cache_paths?.hf_hub_cache || "", onChange:ev=>setSettingsDraft({...settingsDraft, cache_paths:{...settingsDraft.cache_paths, hf_hub_cache:ev.target.value}}), placeholder:"hf_hub_cache"}) : null,
+                e("div", {className:"button-row"},
+                  e("button", {onClick:saveSettings}, "Save settings"),
+                  e("button", {className:"secondary", onClick:()=>post("/api/settings/use-recommended", {}, data=>setSettingsDraft(data))}, "Use Gemma e2b"),
+                  e("button", {className:"secondary", onClick:()=>post("/api/settings/download-recommended", {})}, "Download Gemma"),
+                  e("button", {className:"danger", onClick:()=>post("/api/settings/reset", {}, data=>setSettingsDraft(data))}, "Defaults")
+                )
+              )
+            ),
+            e("section", {className:"panel"},
+              e("div", {className:"panel-head"}, e("strong", null, "Import and attach"), e("button", {className:"secondary", onClick:importExisting}, "Import")),
+              e("div", {className:"panel-body stack"},
+                ["video","primary_subtitle","japanese","direct","easy","reference"].map(key => e("input", {key, value:importDraft[key] || "", onChange:ev=>setImportDraft({...importDraft, [key]:ev.target.value}), placeholder:key})),
+                e("div", {className:"button-row"}, ["ja","direct","easy","reference"].map(role => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[role === "ja" ? "japanese" : role], onClick:()=>post("/api/job/attach", {job_id:selectedJobId, role, path:importDraft[role === "ja" ? "japanese" : role]})}, `Attach ${role}`)))
+              )
+            ),
+            e("section", {className:"panel"},
+              e("div", {className:"panel-head"}, e("strong", null, "Health"), e("button", {className:"secondary", onClick:()=>api("/api/health").then(setHealth).catch(err=>setError(err.message))}, "Check setup")),
+              e("pre", null, health ? [health.summary, ...(health.checks || []).map(item => `[${item.status}] ${item.name}: ${item.detail}`)].join("\\n") : "Health check output appears here.")
+            ),
+            e("section", {className:"panel"},
+              e("div", {className:"panel-head"}, e("strong", null, "Redo log"), e("span", null, status.rebuild_running ? "Live" : "Idle")),
+              e("pre", null, status.rebuild_log || "Redo output appears here.")
             )
           )
         ),
@@ -477,6 +633,270 @@ class WebTranscriberState:
 STATE = WebTranscriberState()
 
 
+def _scene_contexts(data: list[dict[str, Any]] | None) -> list[SceneContextBlock]:
+    return [
+        SceneContextBlock(
+            start_seconds=float(item.get("start_seconds", 0)),
+            end_seconds=float(item.get("end_seconds", 0)),
+            notes=str(item.get("notes", "")).strip(),
+        )
+        for item in (data or [])
+        if str(item.get("notes", "")).strip()
+    ]
+
+
+class WebServiceState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.service = build_service()
+        self.worker_process: subprocess.Popen[str] | None = None
+        self.rebuild_process: subprocess.Popen[str] | None = None
+        self.rebuild_log = ""
+
+    def snapshot(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "jobs": self.service.status_rows(),
+                "pause_requested": self.service.store.pause_requested(),
+                "worker_running": self._running(self.worker_process),
+                "rebuild_running": self._running(self.rebuild_process),
+                "rebuild_log": self.rebuild_log[-6000:],
+                "settings": self.settings(),
+            }
+
+    def settings(self) -> dict[str, Any]:
+        config = self.service.config
+        return {
+            "profiles": sorted(config.profiles),
+            "default_profile": config.default_profile,
+            "models": asdict(config.models),
+            "cache_paths": asdict(config.cache_paths),
+            "recommended_translation_model": RECOMMENDED_TRANSLATION_MODEL,
+        }
+
+    def job(self, job_id: str) -> dict[str, Any]:
+        _job_dir, manifest = self.service.load_job(job_id)
+        return {
+            "manifest": manifest.to_dict(),
+            "preview": self.service.preview_rows(job_id),
+            "subtitle_files": {key: str(value) for key, value in self.service.subtitle_file_paths(job_id).items()},
+        }
+
+    def enqueue(self, payload: dict[str, Any]) -> dict[str, Any]:
+        targets = [Path(value).expanduser() for value in payload.get("targets", [])]
+        profile = str(payload.get("profile") or self.service.config.default_profile)
+        recursive = bool(payload.get("recursive", True))
+        include_adapted = bool(payload.get("include_adapted_english", True))
+        prefer_fast = bool(payload.get("prefer_fast_translation", False))
+        batch_label = _optional_str(payload.get("batch_label"))
+        context = _optional_str(payload.get("context"))
+        scene_contexts = _scene_contexts(payload.get("scene_contexts"))
+        manifests = []
+        skipped: list[Path] = []
+        for target in targets:
+            if target.is_dir():
+                added, folder_skipped = self.service.enqueue_folder(
+                    folder=target,
+                    profile=profile,
+                    series=batch_label,
+                    context=context,
+                    scene_contexts=scene_contexts,
+                    recursive=recursive,
+                    include_adapted_english=include_adapted,
+                    prefer_fast_translation=prefer_fast,
+                )
+                manifests.extend(added)
+                skipped.extend(folder_skipped)
+            else:
+                added, file_skipped = self.service.enqueue_many(
+                    [target],
+                    profile=profile,
+                    series=batch_label,
+                    context=context,
+                    scene_contexts=scene_contexts,
+                    include_adapted_english=include_adapted,
+                    prefer_fast_translation=prefer_fast,
+                )
+                manifests.extend(added)
+                skipped.extend(file_skipped)
+        return {"queued": [item.job_id for item in manifests], "skipped": [str(path) for path in skipped]}
+
+    def import_existing(self, payload: dict[str, Any]) -> dict[str, Any]:
+        manifest = self.service.import_existing(
+            profile=str(payload.get("profile") or self.service.config.default_profile),
+            video=_path_or_none(payload.get("video")),
+            primary_subtitle=_path_or_none(payload.get("primary_subtitle")),
+            japanese=_path_or_none(payload.get("japanese")),
+            direct=_path_or_none(payload.get("direct")),
+            easy=_path_or_none(payload.get("easy")),
+            reference=_path_or_none(payload.get("reference")),
+            series=_optional_str(payload.get("batch_label")),
+            context=_optional_str(payload.get("context")),
+            scene_contexts=_scene_contexts(payload.get("scene_contexts")),
+            include_adapted_english=bool(payload.get("include_adapted_english", True)),
+            prefer_fast_translation=bool(payload.get("prefer_fast_translation", False)),
+        )
+        return {"job_id": manifest.job_id}
+
+    def start_worker(self) -> dict[str, Any]:
+        self.service.store.set_pause(False)
+        if self._running(self.worker_process):
+            return {"message": "Worker already running", "pid": self.worker_process.pid}
+        self.worker_process = subprocess.Popen(
+            [sys.executable, "-m", "local_subtitle_stack.cli", "worker"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            creationflags=no_window_creationflags(),
+        )
+        return {"message": "Worker started", "pid": self.worker_process.pid}
+
+    def stop_worker(self) -> dict[str, Any]:
+        self.service.store.set_pause(True)
+        return {"message": "Worker will stop after the next safe step"}
+
+    def retry(self, job_id: str) -> dict[str, Any]:
+        manifest = self.service.resume(job_id)
+        self.start_worker()
+        return {"job_id": manifest.job_id}
+
+    def save_notes(self, payload: dict[str, Any]) -> dict[str, Any]:
+        manifest = self.service.save_job_notes(
+            str(payload["job_id"]),
+            batch_label=_optional_str(payload.get("batch_label")),
+            overall_context=_optional_str(payload.get("context")),
+            scene_contexts=_scene_contexts(payload.get("scene_contexts")),
+            include_adapted_english=payload.get("include_adapted_english"),
+            prefer_fast_translation=payload.get("prefer_fast_translation"),
+        )
+        return {"job_id": manifest.job_id}
+
+    def save_line(self, payload: dict[str, Any]) -> dict[str, Any]:
+        manifest = self.service.update_subtitle_line(
+            str(payload["job_id"]),
+            cue_index=int(payload["cue_index"]),
+            japanese_text=payload.get("japanese_text"),
+            literal_english_text=payload.get("literal_english_text"),
+            adapted_english_text=payload.get("adapted_english_text"),
+            reference_text=payload.get("reference_text"),
+        )
+        return {"job_id": manifest.job_id}
+
+    def attach(self, payload: dict[str, Any]) -> dict[str, Any]:
+        manifest = self.service.attach_existing_subtitle(
+            str(payload["job_id"]),
+            role=str(payload["role"]),
+            subtitle_path=Path(str(payload["path"])).expanduser(),
+        )
+        return {"job_id": manifest.job_id}
+
+    def rebuild(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._running(self.rebuild_process):
+            raise RuntimeError("Redo English is already running.")
+        job_id = str(payload["job_id"])
+        self.save_notes(payload)
+        command = [sys.executable, "-m", "local_subtitle_stack.cli", "rebuild-english", job_id]
+        start = _optional_str(payload.get("start_timecode"))
+        end = _optional_str(payload.get("end_timecode"))
+        if start and end:
+            command = [
+                sys.executable,
+                "-m",
+                "local_subtitle_stack.cli",
+                "rebuild-english-range",
+                job_id,
+                "--start",
+                start,
+                "--end",
+                end,
+            ]
+        self.rebuild_log = ""
+        self.rebuild_process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+            creationflags=no_window_creationflags(),
+        )
+        threading.Thread(target=self._drain_rebuild_log, daemon=True).start()
+        return {"message": "Redo English started", "pid": self.rebuild_process.pid}
+
+    def open_target(self, payload: dict[str, Any]) -> dict[str, Any]:
+        job_id = str(payload["job_id"])
+        action = str(payload["action"])
+        if action == "review":
+            paths = self.service.open_review(job_id)
+            return {"opened": [str(path) for path in paths]}
+        if action == "folder":
+            return {"opened": str(self.service.open_output_folder(job_id))}
+        path = self.service.open_subtitle_file(job_id, action)
+        return {"opened": str(path)}
+
+    def health(self) -> dict[str, Any]:
+        return self.service.health_check()
+
+    def save_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
+        models = payload.get("models", {})
+        cache_paths = payload.get("cache_paths", {})
+        self.service.config.models.asr_engine = _optional_str(models.get("asr_engine")) or ModelConfig().asr_engine
+        self.service.config.models.asr = _optional_str(models.get("asr")) or ModelConfig().asr
+        self.service.config.models.faster_whisper_profile = (
+            _optional_str(models.get("faster_whisper_profile")) or ModelConfig().faster_whisper_profile
+        )
+        self.service.config.models.literal_translation = (
+            _optional_str(models.get("literal_translation")) or ModelConfig().literal_translation
+        )
+        self.service.config.models.adapted_translation = (
+            _optional_str(models.get("adapted_translation")) or ModelConfig().adapted_translation
+        )
+        self.service.config.cache_paths.hf_hub_cache = (
+            _optional_str(cache_paths.get("hf_hub_cache")) or CachePaths().hf_hub_cache
+        )
+        save_config(self.service.config)
+        return self.settings()
+
+    def reset_settings(self) -> dict[str, Any]:
+        self.service.config.models = ModelConfig()
+        self.service.config.cache_paths = CachePaths()
+        save_config(self.service.config)
+        return self.settings()
+
+    def use_recommended_model(self) -> dict[str, Any]:
+        self.service.config.models.literal_translation = RECOMMENDED_TRANSLATION_MODEL
+        self.service.config.models.adapted_translation = RECOMMENDED_TRANSLATION_MODEL
+        save_config(self.service.config)
+        return self.settings()
+
+    def pull_recommended_model(self) -> dict[str, Any]:
+        threading.Thread(target=self.service.ollama.pull_model, args=(RECOMMENDED_TRANSLATION_MODEL,), daemon=True).start()
+        return {"message": f"Downloading {RECOMMENDED_TRANSLATION_MODEL}"}
+
+    def _drain_rebuild_log(self) -> None:
+        process = self.rebuild_process
+        if process is None or process.stdout is None:
+            return
+        for line in process.stdout:
+            with self.lock:
+                self.rebuild_log += line
+
+    def _running(self, process: subprocess.Popen[str] | None) -> bool:
+        return process is not None and process.poll() is None
+
+
+APP_STATE = WebServiceState()
+
+
+def _optional_str(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text or None
+
+
+def _path_or_none(value: Any) -> Path | None:
+    text = _optional_str(value)
+    return Path(text).expanduser() if text else None
+
+
 def format_bytes(value: int) -> str:
     size = float(value)
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -487,8 +907,8 @@ def format_bytes(value: int) -> str:
 
 
 def model_storage_snapshot() -> dict[str, Any]:
-    config = load_config()
-    ollama = OllamaClient(executable_path=config.tools.ollama)
+    config = APP_STATE.service.config
+    ollama = APP_STATE.service.ollama
     try:
         details = ollama.list_model_details()
     except Exception:
@@ -573,9 +993,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/":
             self._send_html(HTML)
         elif path == "/api/status":
-            self._send_json(STATE.snapshot())
+            self._send_json(APP_STATE.snapshot())
         elif path == "/api/models":
             self._send_json(model_storage_snapshot())
+        elif path == "/api/health":
+            self._send_json(APP_STATE.health())
+        elif path == "/api/job":
+            query = dict(item.split("=", 1) for item in urlparse(self.path).query.split("&") if "=" in item)
+            self._send_json(APP_STATE.job(query.get("id", "")))
         elif path == "/api/pick-folder":
             self._send_json({"path": pick_folder()})
         elif path == "/api/pick-files":
@@ -588,9 +1013,39 @@ class Handler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if self.path == "/api/start":
                 targets = [Path(value).expanduser() for value in payload.get("targets", [])]
-                self._send_json(STATE.start(targets, payload.get("profile", "low_gpu"), bool(payload.get("recursive", True))))
+                result = APP_STATE.enqueue({**payload, "targets": [str(path) for path in targets]})
+                APP_STATE.start_worker()
+                self._send_json({**APP_STATE.snapshot(), **result})
+            elif self.path == "/api/enqueue":
+                self._send_json(APP_STATE.enqueue(payload))
             elif self.path == "/api/cancel":
-                self._send_json(STATE.cancel())
+                self._send_json(APP_STATE.stop_worker())
+            elif self.path == "/api/import-existing":
+                self._send_json(APP_STATE.import_existing(payload))
+            elif self.path == "/api/worker/start":
+                self._send_json(APP_STATE.start_worker())
+            elif self.path == "/api/worker/stop":
+                self._send_json(APP_STATE.stop_worker())
+            elif self.path == "/api/job/retry":
+                self._send_json(APP_STATE.retry(str(payload["job_id"])))
+            elif self.path == "/api/job/notes":
+                self._send_json(APP_STATE.save_notes(payload))
+            elif self.path == "/api/job/line":
+                self._send_json(APP_STATE.save_line(payload))
+            elif self.path == "/api/job/attach":
+                self._send_json(APP_STATE.attach(payload))
+            elif self.path == "/api/job/rebuild":
+                self._send_json(APP_STATE.rebuild(payload))
+            elif self.path == "/api/open":
+                self._send_json(APP_STATE.open_target(payload))
+            elif self.path == "/api/settings/save":
+                self._send_json(APP_STATE.save_settings(payload))
+            elif self.path == "/api/settings/reset":
+                self._send_json(APP_STATE.reset_settings())
+            elif self.path == "/api/settings/use-recommended":
+                self._send_json(APP_STATE.use_recommended_model())
+            elif self.path == "/api/settings/download-recommended":
+                self._send_json(APP_STATE.pull_recommended_model())
             else:
                 self.send_error(404)
         except Exception as exc:
