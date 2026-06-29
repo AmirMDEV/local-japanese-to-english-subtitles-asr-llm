@@ -131,6 +131,13 @@ HTML = r"""<!doctype html>
       overflow: clip;
     }
     .model-settings-panel { order: -1; }
+    .model-settings-panel .panel-body {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .model-settings-panel .section-note,
+    .model-settings-panel .button-row {
+      grid-column: 1 / -1;
+    }
     .panel-head {
       display: flex;
       justify-content: space-between;
@@ -384,12 +391,21 @@ HTML = r"""<!doctype html>
       main { padding: 12px; }
       .controls { grid-template-columns: 1fr; }
       .control-span-12, .control-span-6, .control-span-4, .control-span-3 { grid-column: 1; }
-    .button-row button, .button-row select { flex: 1 1 150px; }
+      .button-row button, .button-row select { flex: 1 1 150px; }
       .status-grid { grid-template-columns: 1fr; }
       .model-row { grid-template-columns: 1fr; gap: 4px; }
+      .model-settings-panel .panel-body { grid-template-columns: 1fr; }
       .two-col { grid-template-columns: 1fr; }
       .guided-grid { grid-template-columns: 1fr; }
-      .workflow { grid-template-columns: 1fr; }
+      .workflow {
+        grid-auto-flow: column;
+        grid-auto-columns: minmax(178px, 48vw);
+        grid-template-columns: none;
+        overflow-x: auto;
+        padding-bottom: 4px;
+        scroll-snap-type: x proximity;
+      }
+      .workflow-step { scroll-snap-align: start; }
       pre { min-height: 180px; }
     }
   </style>
@@ -476,6 +492,12 @@ HTML = r"""<!doctype html>
       const refresh = () => api("/api/status").then(data => { setStatus(data); if (!settingsDraft) setSettingsDraft(data.settings); }).catch(err => setError(err.message));
       const refreshModels = () => api("/api/models").then(setModels).catch(err => setError(err.message));
       React.useEffect(() => { refresh(); refreshModels(); const id = setInterval(refresh, 1500); return () => clearInterval(id); }, []);
+      React.useEffect(() => {
+        const currentJobs = status.jobs || [];
+        if (currentJobs.length && (!selectedJobId || !currentJobs.some(row => row.job_id === selectedJobId))) {
+          setSelectedJobId(currentJobs[0].job_id);
+        }
+      }, [status.jobs, selectedJobId]);
       React.useEffect(() => {
         if (!selectedJobId) return;
         api(`/api/job?id=${encodeURIComponent(selectedJobId)}`).then(data => {
@@ -657,6 +679,54 @@ HTML = r"""<!doctype html>
         ["5", "Review", "Open subtitle lines, edit text, or add context to selected lines."],
         ["6", "Export", "Open saved subtitles or Subtitle Edit."]
       ];
+      const subtitleImportPanel = e("section", {className:"panel"},
+        e("div", {className:"panel-head"}, e("strong", null, "Load subtitle files into preview"), e("button", {className:"secondary", onClick:importExisting}, "Create preview job")),
+        e("div", {className:"panel-body stack"},
+          e("p", {className:"section-note"}, "Use this when you already have SRT files. Create a preview job from them, or attach one SRT to the selected job so it appears in Preview and line editor. After loading, select lines there and add time-range context to retranslate only that part."),
+          e("div", {className:"guided-grid"},
+            e("input", {value:importDraft.video || "", readOnly:true, placeholder:"Video file to link"}),
+            e("button", {className:"secondary", onClick:()=>api("/api/pick-files").then(d => d.paths?.[0] && setImportDraft({...importDraft, video:d.paths[0]})).catch(err=>setError(err.message))}, "Pick video")
+          ),
+          e("div", {className:"guided-grid"},
+            e("input", {value:importDraft.japanese || "", readOnly:true, placeholder:"Japanese SRT"}),
+            e("button", {className:"secondary", onClick:()=>chooseSubtitle("japanese")}, "Pick Japanese")
+          ),
+          e("div", {className:"guided-grid"},
+            e("input", {value:importDraft.direct || "", readOnly:true, placeholder:"Direct English translation SRT"}),
+            e("button", {className:"secondary", onClick:()=>chooseSubtitle("direct")}, "Pick direct")
+          ),
+          e("div", {className:"guided-grid"},
+            e("input", {value:importDraft.easy || "", readOnly:true, placeholder:"Context-applied English SRT"}),
+              e("button", {className:"secondary", onClick:()=>chooseSubtitle("easy")}, "Pick context-applied")
+          ),
+          e("div", {className:"guided-grid"},
+            e("input", {value:importDraft.reference || "", readOnly:true, placeholder:"Reference SRT"}),
+            e("button", {className:"secondary", onClick:()=>chooseSubtitle("reference")}, "Pick reference")
+          ),
+          e("div", {className:"button-row"}, [
+            ["ja", "japanese", "Attach Japanese to preview"],
+            ["direct", "direct", "Attach direct English translation to preview"],
+            ["easy", "easy", "Attach context-applied English to preview"],
+            ["reference", "reference", "Attach reference to preview"]
+          ].map(([role, key, label]) => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[key], onClick:()=>attachSubtitle(role, key)}, label)))
+        )
+      );
+      const jobsPanel = e("section", {className:"panel"},
+        e("div", {className:"panel-head"}, e("strong", null, "Jobs"), e("span", null, status.worker_running ? "Running" : (status.pause_requested ? "Stopping" : "Idle"))),
+        e("div", {className:"panel-body stack"},
+          e("div", {className:"job-list"},
+            jobs.length ? jobs.map(row => e("button", {key:row.job_id, className:`job-row ${row.job_id===selectedJobId?"active":""}`, onClick:()=>setSelectedJobId(row.job_id)},
+              e("strong", null, row.source),
+              e("span", {className:"tiny"}, `${row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
+              e("span", null, jobStepText(row))
+            )) : e("div", {className:"empty"}, "No jobs yet.")
+          ),
+          e("div", {className:"button-row"},
+            e("button", {className:"secondary", disabled:!jobs.some(row => ["completed", "failed", "paused"].includes(row.status)), onClick:()=>clearJobs("finished")}, "Clear finished jobs"),
+            e("button", {className:"danger", disabled:!jobs.some(row => row.status !== "working"), onClick:()=>clearJobs("all")}, "Clear all non-running jobs")
+          )
+        )
+      );
 
       return e(React.Fragment, null,
         e("header", {className:"topbar"},
@@ -715,25 +785,11 @@ HTML = r"""<!doctype html>
                   : e("div", {className:"empty"}, "Select a folder, select files, or paste a path.")
               )
             ),
-            e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Jobs"), e("span", null, status.worker_running ? "Running" : (status.pause_requested ? "Stopping" : "Idle"))),
-              e("div", {className:"panel-body stack"},
-                e("div", {className:"job-list"},
-                  jobs.length ? jobs.map(row => e("button", {key:row.job_id, className:`job-row ${row.job_id===selectedJobId?"active":""}`, onClick:()=>setSelectedJobId(row.job_id)},
-                    e("strong", null, row.source),
-                    e("span", {className:"tiny"}, `${row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
-                    e("span", null, jobStepText(row))
-                  )) : e("div", {className:"empty"}, "No jobs yet.")
-                ),
-                e("div", {className:"button-row"},
-                  e("button", {className:"secondary", disabled:!jobs.some(row => ["completed", "failed", "paused"].includes(row.status)), onClick:()=>clearJobs("finished")}, "Clear finished jobs"),
-                  e("button", {className:"danger", disabled:!jobs.some(row => row.status !== "working"), onClick:()=>clearJobs("all")}, "Clear all non-running jobs")
-                )
-              )
-            ),
+            subtitleImportPanel,
             error ? e("section", {className:"panel error"}, e("div", {className:"panel-head"}, e("strong", null, "Error")), e("div", {className:"panel-body"}, e("p", null, error))) : null
           ),
           e("div", {className:"stack"},
+            jobsPanel,
             e("section", {className:"panel"},
               e("div", {className:"panel-head"}, e("strong", null, "Selected job"), e("span", null, selectedRow ? selectedRow.status : "None")),
               e("div", {className:"panel-body stack"},
@@ -916,38 +972,6 @@ HTML = r"""<!doctype html>
                   e("button", {className:"secondary", onClick:()=>post("/api/settings/download-recommended", {})}, "Download Gemma"),
                   e("button", {className:"danger", onClick:()=>post("/api/settings/reset", {}, data=>setSettingsDraft(data))}, "Defaults")
                 )
-              )
-            ),
-            e("section", {className:"panel"},
-              e("div", {className:"panel-head"}, e("strong", null, "Load subtitle files into preview"), e("button", {className:"secondary", onClick:importExisting}, "Create preview job")),
-              e("div", {className:"panel-body stack"},
-                e("p", {className:"section-note"}, "Use this when you already have SRT files. Create a preview job from them, or attach one SRT to the selected job so it appears in Preview and line editor. After loading, select lines there and add time-range context to retranslate only that part."),
-                e("div", {className:"guided-grid"},
-                  e("input", {value:importDraft.video || "", readOnly:true, placeholder:"Video file to link"}),
-                  e("button", {className:"secondary", onClick:()=>api("/api/pick-files").then(d => d.paths?.[0] && setImportDraft({...importDraft, video:d.paths[0]})).catch(err=>setError(err.message))}, "Pick video")
-                ),
-                e("div", {className:"guided-grid"},
-                  e("input", {value:importDraft.japanese || "", readOnly:true, placeholder:"Japanese SRT"}),
-                  e("button", {className:"secondary", onClick:()=>chooseSubtitle("japanese")}, "Pick Japanese")
-                ),
-                e("div", {className:"guided-grid"},
-                  e("input", {value:importDraft.direct || "", readOnly:true, placeholder:"Direct English translation SRT"}),
-                  e("button", {className:"secondary", onClick:()=>chooseSubtitle("direct")}, "Pick direct")
-                ),
-                e("div", {className:"guided-grid"},
-                  e("input", {value:importDraft.easy || "", readOnly:true, placeholder:"Context-applied English SRT"}),
-                    e("button", {className:"secondary", onClick:()=>chooseSubtitle("easy")}, "Pick context-applied")
-                ),
-                e("div", {className:"guided-grid"},
-                  e("input", {value:importDraft.reference || "", readOnly:true, placeholder:"Reference SRT"}),
-                  e("button", {className:"secondary", onClick:()=>chooseSubtitle("reference")}, "Pick reference")
-                ),
-                e("div", {className:"button-row"}, [
-                  ["ja", "japanese", "Attach Japanese to preview"],
-                  ["direct", "direct", "Attach direct English translation to preview"],
-                  ["easy", "easy", "Attach context-applied English to preview"],
-                  ["reference", "reference", "Attach reference to preview"]
-                ].map(([role, key, label]) => e("button", {key:role, className:"secondary", disabled:!selectedJobId || !importDraft[key], onClick:()=>attachSubtitle(role, key)}, label)))
               )
             ),
             e("section", {className:"panel"},
