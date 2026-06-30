@@ -2,6 +2,7 @@
 
 ## 2026-06-25
 
+- Applied an Amir UI Revamp repair pass to make completed, paused, and model status labels more honest, reduce oversized text metrics, stop the header floating over long web UI workflows, and keep queue picker buttons readable inside the narrow input panel.
 - Fixed adaptive GPU detection on newer Windows `nvidia-smi` output by falling back to parsing the visible memory table when `memory.free,memory.total` query fields are unavailable.
 - Changed built-in translation defaults to Gemma 4 Uncensored for both direct and context-applied English so reset/new configs do not fall back to Qwen.
 - Added an always-visible progress bar to running job cards so live progress still appears when another completed job is selected.

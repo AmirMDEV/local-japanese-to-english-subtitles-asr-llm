@@ -64,6 +64,7 @@ HTML = r"""<!doctype html>
     }
     button, select, input { font: inherit; }
     button {
+      min-width: 0;
       min-height: 38px;
       border: 1px solid transparent;
       border-radius: 6px;
@@ -72,7 +73,8 @@ HTML = r"""<!doctype html>
       cursor: pointer;
       font-weight: 700;
       padding: 9px 12px;
-      white-space: nowrap;
+      line-height: 1.2;
+      white-space: normal;
     }
     button.secondary { background: transparent; color: var(--soft); border-color: var(--line); }
     button.danger { background: var(--danger); color: var(--danger-text); }
@@ -102,16 +104,11 @@ HTML = r"""<!doctype html>
       padding: clamp(14px, 2vw, 24px);
     }
     .topbar {
-      position: sticky;
-      top: 0;
-      z-index: 5;
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       gap: 16px;
       align-items: center;
-      padding: 14px 0 16px;
-      background: linear-gradient(180deg, rgba(16,17,19,.98), rgba(16,17,19,.86) 72%, transparent);
-      backdrop-filter: blur(10px);
+      padding: 0 0 16px;
     }
     h1 { margin: 0; font-size: clamp(24px, 3vw, 38px); letter-spacing: 0; line-height: 1.08; }
     p { color: var(--muted); line-height: 1.5; margin: 6px 0 0; }
@@ -265,6 +262,11 @@ HTML = r"""<!doctype html>
     }
     .metric span { color: var(--muted); display: block; font-size: 12px; }
     .metric strong { display: block; font-size: clamp(20px, 3vw, 32px); margin-top: 2px; }
+    .metric-compact strong {
+      font-size: 15px;
+      line-height: 1.3;
+      overflow-wrap: anywhere;
+    }
     .progress-card {
       display: grid;
       gap: 8px;
@@ -606,20 +608,27 @@ HTML = r"""<!doctype html>
       })[stage] || (stage || "Not started");
     const jobStepText = row => {
       if (!row) return "";
-      if (row.stage_progress_message) return row.step_text || row.stage_progress_message;
       if (row.status === "completed" && row.stage === "finalize") return "Saved subtitle files";
+      if (row.stage_progress_message) return row.step_text || row.stage_progress_message;
       return row.step_text || "";
     };
     const selectedStageLabel = row => {
-      if (row?.progress_stage) return stageLabel(row.progress_stage);
       if (row?.status === "completed" && row?.stage === "finalize") return "Saved subtitle files";
+      if (row?.progress_stage) return stageLabel(row.progress_stage);
       return stageLabel(row?.stage);
     };
     const progressPercent = row => Math.max(0, Math.min(100, Number(row?.stage_progress_percent || row?.overall_progress_percent || 0)));
     const overallProgressPercent = row => Math.max(0, Math.min(100, Number(row?.overall_progress_percent || 0)));
-    const hasLiveProgress = row => Boolean(row && row.stage_progress_message);
+    const displayOverallPercent = row => row?.status === "completed" && row?.stage === "finalize" ? "100.00" : (row?.overall_progress_percent || 0);
+    const hasLiveProgress = row => Boolean(row && row.stage_progress_message && row.status !== "completed");
     const progressAgeSeconds = row => Number(row?.progress_age_seconds || 0);
       const progressAgeLabel = row => row?.progress_age_text ? `${row.progress_age_text} ago` : "No progress timestamp";
+    const modelMetricLabel = row => {
+      const activeStage = row?.progress_stage || row?.stage;
+      if (activeStage === "transcribe") return "Japanese model";
+      if (["translate_literal", "translate_adapted"].includes(activeStage)) return "Translation model";
+      return "Model in use";
+    };
     const workerResourceText = resources => {
       if (!resources || !resources.pid) return "";
       const cpu = resources.cpu_percent === "" ? "CPU warming up" : `CPU ${resources.cpu_percent}%`;
@@ -647,6 +656,7 @@ HTML = r"""<!doctype html>
       if (row.status === "completed") return "Review output now: open the subtitle lines below, edit any bad line, or open the saved files.";
       if (row.status === "failed") return "This job failed. Read the latest message, then use Run this job again.";
       if (row.stop_requested === "true") return "Stopping this job after the current safe step.";
+      if (row.status === "paused") return `Paused at: ${stageLabel(row.stage)}. Press Resume this job to continue.`;
       if (row.status === "queued") return "Queued. Press Start processing all jobs when ready.";
       return `Now doing: ${stageLabel(row.stage)}. Wait, or press Stop after current safe step.`;
     };
@@ -1022,7 +1032,7 @@ HTML = r"""<!doctype html>
             jobs.length ? jobs.map(row => e("div", {key:row.job_id, className:`job-card ${row.job_id===selectedJobId?"active":""}`},
               e("button", {className:"job-row", onClick:()=>setSelectedJobId(row.job_id)},
                 e("strong", null, row.source),
-                e("span", {className:"tiny"}, `${row.stop_requested === "true" ? "stopping" : row.status} | ${selectedStageLabel(row)} | ${row.overall_progress_percent || 0}%`),
+                e("span", {className:"tiny"}, `${row.stop_requested === "true" ? "stopping" : row.status} | ${selectedStageLabel(row)} | ${displayOverallPercent(row)}%`),
                 progressHealth(row) ? e("span", {className:"tiny"}, progressHealth(row)) : null,
                 row.status === "working" && workerResourceText(status.worker_resources) ? e("span", {className:"tiny"}, workerResourceText(status.worker_resources)) : null,
                 e("span", null, jobStepText(row)),
@@ -1061,9 +1071,9 @@ HTML = r"""<!doctype html>
                     e("label", null, "Manual path"),
                     e("input", {value:manualPath, onChange:ev=>setManualPath(ev.target.value), onKeyDown:ev=>{ if (ev.key === "Enter") addManual(); }, disabled:status.running, placeholder:"Paste a folder or video path"})
                   ),
-                  e("button", {className:"control-span-4", onClick:pickFolder, disabled:status.running}, "Select folder"),
-                  e("button", {className:"control-span-4", onClick:pickFiles, disabled:status.running}, "Select files"),
-                  e("button", {className:"secondary control-span-4", onClick:addManual, disabled:status.running || !manualPath.trim()}, "Add path"),
+                  e("button", {className:"control-span-6", onClick:pickFolder, disabled:status.running}, "Select folder"),
+                  e("button", {className:"control-span-6", onClick:pickFiles, disabled:status.running}, "Select files"),
+                  e("button", {className:"secondary control-span-12", onClick:addManual, disabled:status.running || !manualPath.trim()}, "Add path"),
                   e("div", {className:"field control-span-6"},
                     e("label", null, "Profile"),
                     e("select", {value:profile, onChange:ev=>setProfile(ev.target.value)},
@@ -1100,11 +1110,11 @@ HTML = r"""<!doctype html>
             panel("selected-job", "selected-job-panel", "Selected job", e("span", null, selectedRow ? selectedRow.status : "None"), "panel-body stack",
                 e("div", {className:"review-box"}, e("strong", null, "What to do now"), e("p", null, reviewHint(selectedRow))),
                 selectedRow ? e("div", {className:"status-grid"},
-                  e("div", {className:"metric"}, e("span", null, "Current step"), e("strong", null, selectedStageLabel(selectedRow))),
-                  e("div", {className:"metric"}, e("span", null, "Progress"), e("strong", null, `${selectedRow.overall_progress_percent || 0}%`)),
-                  e("div", {className:"metric"}, e("span", null, "Model in use"), e("strong", null, modelText))
+                  e("div", {className:"metric metric-compact"}, e("span", null, "Current step"), e("strong", null, selectedStageLabel(selectedRow))),
+                  e("div", {className:"metric"}, e("span", null, "Progress"), e("strong", null, `${displayOverallPercent(selectedRow)}%`)),
+                  e("div", {className:"metric metric-compact"}, e("span", null, modelMetricLabel(selectedRow)), e("strong", null, modelText))
                 ) : e("div", {className:"empty"}, "Select a job."),
-                hasLiveProgress(selectedRow) ? progressPanel(selectedRow, "Running step progress", status.worker_resources) : null,
+                hasLiveProgress(selectedRow) ? progressPanel(selectedRow, selectedRow.status === "working" ? "Running step progress" : "Saved step progress", status.worker_resources) : null,
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", disabled:!canResumeJob(selectedRow), onClick:()=>resumeJob(selectedJobId)}, selectedRow?.status === "working" ? "Resume stuck job" : "Resume this job"),
                   e("button", {className:"danger", disabled:!canStopJob(selectedRow), onClick:()=>stopJob(selectedJobId)}, selectedRow?.stop_requested === "true" ? "Stopping this job" : "Stop this job after current step"),

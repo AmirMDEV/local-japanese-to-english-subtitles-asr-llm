@@ -1436,6 +1436,37 @@ def test_completed_job_status_can_show_active_second_pass_progress(
     assert "Second-pass group 2 of 4" in row["step_text"]
 
 
+def test_completed_job_status_hides_stale_second_pass_progress(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    patch_runtime(monkeypatch)
+    service = build_service(tmp_path, SuccessfulOllama())
+    source = tmp_path / "stale-second-pass-progress.mp4"
+    source.write_text("video", encoding="utf-8")
+    manifest = service.enqueue(source, profile="default")
+    job_dir, manifest = service.store.find_job(manifest.job_id)
+    manifest.status = JOB_STATUS_COMPLETED
+    manifest.current_stage = "finalize"
+    manifest.current_progress = StageProgress(
+        stage=STAGE_ADAPTED,
+        current=2.0,
+        total=4.0,
+        unit="groups",
+        percent=50.0,
+        message="Second-pass group 2 of 4",
+        updated_at="2000-01-01T00:00:00+00:00",
+    )
+    service.store.save_manifest(job_dir, manifest)
+
+    row = service.status_rows()[0]
+
+    assert row["progress_stage"] == ""
+    assert row["stage_progress_percent"] == "100.00"
+    assert row["overall_progress_percent"] == "100.00"
+    assert row["stage_progress_message"] == ""
+    assert row["step_text"] == "Saved subtitle files"
+
+
 def test_rebuild_english_splits_batches_when_model_returns_too_few_lines(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

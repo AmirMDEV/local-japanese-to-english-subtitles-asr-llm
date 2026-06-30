@@ -119,10 +119,19 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "job-delete" in HTML
     assert "Remove job from list" in HTML
     assert "What to do now" in HTML
+    assert "Paused at:" in HTML
+    assert "Saved step progress" in HTML
+    assert "Translation model" in HTML
+    assert "Japanese model" in HTML
+    assert "metric-compact" in HTML
     assert "Open direct English translation in Subtitle Edit" in HTML
     assert "Context-applied English" in HTML
     assert "Open review bundle in Subtitle Edit" in HTML
     assert "Add files and start processing" in HTML
+    assert 'e("button", {className:"control-span-6", onClick:pickFolder' in HTML
+    assert 'e("button", {className:"control-span-6", onClick:pickFiles' in HTML
+    assert 'e("button", {className:"secondary control-span-12", onClick:addManual' in HTML
+    assert "white-space: normal" in HTML
     assert "added to every English translation prompt after the Japanese audio has been transcribed" in HTML
     assert "Overall video context" in HTML
     assert "Time-range context" in HTML

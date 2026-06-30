@@ -386,6 +386,14 @@ class WorkerService:
         for job_dir, manifest, state in self.store.list_jobs():
             progress = manifest.current_progress
             progress_age_seconds = elapsed_seconds_since(progress.updated_at) if progress is not None else None
+            stale_completed_progress = (
+                manifest.status == JOB_STATUS_COMPLETED
+                and progress is not None
+                and progress_age_seconds is not None
+                and progress_age_seconds > 300
+            )
+            visible_progress = None if stale_completed_progress else progress
+            visible_progress_age_seconds = None if stale_completed_progress else progress_age_seconds
             latest_event = manifest.events[-1] if manifest.events else None
             rows.append(
                 {
@@ -393,21 +401,27 @@ class WorkerService:
                     "state_dir": state,
                     "status": manifest.status,
                     "stage": manifest.current_stage,
-                    "progress_stage": progress.stage if progress is not None else "",
-                    "step_text": "Waiting to start. Press Start processing all jobs." if manifest.status == JOB_STATUS_QUEUED else self._stage_display_text(manifest),
+                    "progress_stage": visible_progress.stage if visible_progress is not None else "",
+                    "step_text": (
+                        "Waiting to start. Press Start processing all jobs."
+                        if manifest.status == JOB_STATUS_QUEUED
+                        else "Saved subtitle files"
+                        if stale_completed_progress and manifest.current_stage == STAGE_FINALIZE
+                        else self._stage_display_text(manifest)
+                    ),
                     "source": manifest.source_name,
                     "updated_at": manifest.updated_at,
-                    "stage_progress_percent": f"{self._current_stage_percent(manifest):.2f}",
-                    "overall_progress_percent": f"{self._overall_progress_percent(manifest):.2f}",
+                    "stage_progress_percent": f"{100.0 if stale_completed_progress else self._current_stage_percent(manifest):.2f}",
+                    "overall_progress_percent": f"{100.0 if stale_completed_progress else self._overall_progress_percent(manifest):.2f}",
                     "stage_eta_seconds": (
-                        f"{progress.eta_seconds:.2f}"
-                        if progress is not None and progress.eta_seconds is not None
+                        f"{visible_progress.eta_seconds:.2f}"
+                        if visible_progress is not None and visible_progress.eta_seconds is not None
                         else ""
                     ),
-                    "stage_progress_message": progress.message if progress is not None and progress.message else "",
-                    "progress_updated_at": progress.updated_at if progress is not None else "",
-                    "progress_age_seconds": f"{progress_age_seconds:.0f}" if progress_age_seconds is not None else "",
-                    "progress_age_text": format_duration_compact(progress_age_seconds) if progress_age_seconds is not None else "",
+                    "stage_progress_message": visible_progress.message if visible_progress is not None and visible_progress.message else "",
+                    "progress_updated_at": visible_progress.updated_at if visible_progress is not None else "",
+                    "progress_age_seconds": f"{visible_progress_age_seconds:.0f}" if visible_progress_age_seconds is not None else "",
+                    "progress_age_text": format_duration_compact(visible_progress_age_seconds) if visible_progress_age_seconds is not None else "",
                     "source_kind": manifest.source_kind,
                     "translation_source_role": manifest.translation_source_role,
                     "has_reference": "true" if manifest.imported_tracks.get("reference") else "false",
