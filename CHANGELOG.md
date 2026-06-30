@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-30
+
+- Fixed web UI action guards so queue inputs use `worker_running`/`rebuild_running` instead of a nonexistent `status.running`, and redo/coherence/range actions stay disabled while a worker or redo task is active.
+- Fixed app-wide model setting edge cases by making picked local ASR folders save as Kotoba/Hugging Face ASR, and adding confirmation before Defaults resets saved model settings.
+- Added time-range context validation in the browser and backend so invalid, non-finite, or backwards ranges fail with clear messages instead of reaching the redo worker.
+- Fixed dropped `.srt` upload collisions by choosing the next unused filename instead of overwriting when numbered imports already exist.
+
 ## 2026-06-25
 
 - Applied an Amir UI Revamp repair pass to make completed, paused, and model status labels more honest, reduce oversized text metrics, stop the header floating over long web UI workflows, and keep queue picker buttons readable inside the narrow input panel.

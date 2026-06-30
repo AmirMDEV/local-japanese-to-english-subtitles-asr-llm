@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -592,11 +593,16 @@ HTML = r"""<!doctype html>
       return [h, m, s].map(v => String(v).padStart(2, "0")).join(":");
     };
     const timeToSeconds = value => {
-      const parts = String(value || "").split(":").map(Number);
+      const text = String(value || "").trim();
+      if (!text) return null;
+      const parts = text.split(":").map(Number);
+      if (parts.some(part => !Number.isFinite(part))) return null;
       if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
       if (parts.length === 2) return parts[0] * 60 + parts[1];
-      return Number(value) || 0;
+      if (parts.length === 1) return Number.isFinite(parts[0]) ? parts[0] : null;
+      return null;
     };
+    const hasValidRange = (start, end) => Number.isFinite(start) && Number.isFinite(end) && end > start;
       const stageLabel = stage => ({
         extract: "Prepare audio",
         transcribe: "Transcribe source language",
@@ -698,6 +704,8 @@ HTML = r"""<!doctype html>
       const currentSettings = settingsDraft || status.settings || {};
       const sameJson = (left, right) => JSON.stringify(left || {}) === JSON.stringify(right || {});
       const settingsDirty = Boolean(settingsDraft && status.settings && (!sameJson(settingsDraft.models, status.settings.models) || !sameJson(settingsDraft.cache_paths, status.settings.cache_paths)));
+      const queueBusy = Boolean(status.worker_running || status.rebuild_running);
+      const redoBusy = queueBusy;
       const isCollapsed = key => Boolean(collapsedPanels[key]);
       const togglePanel = key => setCollapsedPanels(current => ({...current, [key]:!current[key]}));
       const panel = (key, className, title, action, bodyClass, ...body) => e("section", {className:`panel ${className || ""} ${isCollapsed(key) ? "collapsed" : ""}`.trim(), "data-panel-key":key},
@@ -771,8 +779,19 @@ HTML = r"""<!doctype html>
       const enqueueOnly = () => post("/api/enqueue", {targets, profile, recursive, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast, batch_label:batchLabel, context, scene_contexts:notes}, selectNewJob);
       const addNote = () => {
         if (!noteStart || !noteEnd || !noteText.trim()) return;
-        setNotes(current => current.concat({start_seconds:timeToSeconds(noteStart), end_seconds:timeToSeconds(noteEnd), notes:noteText.trim()}));
+        const start = timeToSeconds(noteStart);
+        const end = timeToSeconds(noteEnd);
+        if (!Number.isFinite(start) || !Number.isFinite(end)) {
+          setError("Use a valid start and end time for this context range.");
+          return;
+        }
+        if (end <= start) {
+          setError("End time must be after start time.");
+          return;
+        }
+        setNotes(current => current.concat({start_seconds:start, end_seconds:end, notes:noteText.trim()}));
         setNoteStart(""); setNoteEnd(""); setNoteText("");
+        setError("");
       };
       const saveNotes = () => selectedJobId && post("/api/job/notes", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
       const deleteJob = jobId => {
@@ -873,7 +892,7 @@ HTML = r"""<!doctype html>
       };
       const chooseSubtitle = key => api("/api/pick-subtitle").then(d => d.path && setImportDraft(current => ({...current, [key]:d.path}))).catch(err => setError(err.message));
       const chooseCacheFolder = () => api("/api/pick-folder").then(d => d.path && saveSettingsDraft({...settingsDraft, cache_paths:{...settingsDraft.cache_paths, hf_hub_cache:d.path}})).catch(err => setError(err.message));
-      const chooseAsrFolder = () => api("/api/pick-folder").then(d => d.path && saveSettingsDraft({...settingsDraft, models:{...settingsDraft.models, asr:d.path}})).catch(err => setError(err.message));
+      const chooseAsrFolder = () => api("/api/pick-folder").then(d => d.path && saveSettingsDraft({...settingsDraft, models:{...settingsDraft.models, asr:d.path, asr_engine:"kotoba"}})).catch(err => setError(err.message));
       const selectedPreviewRows = () => (job?.preview || []).filter(row => selectedCueIndexes.includes(row.cue_index));
       const formatSecondsDisplay = seconds => `${(Math.round((Number(seconds) || 0) * 100) / 100).toFixed(2).replace(/\.?0+$/, "")}s`;
       const formatClockDisplay = seconds => {
@@ -907,6 +926,15 @@ HTML = r"""<!doctype html>
         if (!noteText.trim()) setNoteText("");
       };
       const updateNote = (index, patch) => setNotes(current => current.map((item, noteIndex) => noteIndex === index ? {...item, ...patch} : item));
+      const updateNoteTime = (index, key, value, label) => {
+        const seconds = timeToSeconds(value);
+        if (!Number.isFinite(seconds)) {
+          setError(`Use a valid ${label} time.`);
+          return;
+        }
+        setError("");
+        updateNote(index, {[key]:seconds});
+      };
       const removeNote = index => setNotes(current => current.filter((_item, noteIndex) => noteIndex !== index));
       const toggleCue = (row, ev) => {
         if (ev.shiftKey && selectedCueIndexes.length) {
@@ -929,8 +957,14 @@ HTML = r"""<!doctype html>
       };
       const redoSelectedRange = () => {
         const rows = selectedPreviewRows();
-        const start = rows.length ? formatClock(Math.min(...rows.map(row => Number(row.start)))) : noteStart;
-        const end = rows.length ? formatClock(Math.max(...rows.map(row => Number(row.end)))) : noteEnd;
+        const startSeconds = rows.length ? Math.min(...rows.map(row => Number(row.start))) : timeToSeconds(noteStart);
+        const endSeconds = rows.length ? Math.max(...rows.map(row => Number(row.end))) : timeToSeconds(noteEnd);
+        if (!hasValidRange(startSeconds, endSeconds)) {
+          setError("Use a valid start and end time before retranslating this range.");
+          return;
+        }
+        const start = formatClock(startSeconds);
+        const end = formatClock(endSeconds);
         return post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, start_timecode:start, end_timecode:end, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast});
       };
       const runCoherencePass = () => post("/api/job/coherence-pass", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes});
@@ -1069,11 +1103,11 @@ HTML = r"""<!doctype html>
                 e("div", {className:"controls"},
                   e("div", {className:"field control-span-12"},
                     e("label", null, "Manual path"),
-                    e("input", {value:manualPath, onChange:ev=>setManualPath(ev.target.value), onKeyDown:ev=>{ if (ev.key === "Enter") addManual(); }, disabled:status.running, placeholder:"Paste a folder or video path"})
+                    e("input", {value:manualPath, onChange:ev=>setManualPath(ev.target.value), onKeyDown:ev=>{ if (ev.key === "Enter") addManual(); }, disabled:queueBusy, placeholder:"Paste a folder or video path"})
                   ),
-                  e("button", {className:"control-span-6", onClick:pickFolder, disabled:status.running}, "Select folder"),
-                  e("button", {className:"control-span-6", onClick:pickFiles, disabled:status.running}, "Select files"),
-                  e("button", {className:"secondary control-span-12", onClick:addManual, disabled:status.running || !manualPath.trim()}, "Add path"),
+                  e("button", {className:"control-span-6", onClick:pickFolder, disabled:queueBusy}, "Select folder"),
+                  e("button", {className:"control-span-6", onClick:pickFiles, disabled:queueBusy}, "Select files"),
+                  e("button", {className:"secondary control-span-12", onClick:addManual, disabled:queueBusy || !manualPath.trim()}, "Add path"),
                   e("div", {className:"field control-span-6"},
                     e("label", null, "Profile"),
                     e("select", {value:profile, onChange:ev=>setProfile(ev.target.value)},
@@ -1196,8 +1230,8 @@ HTML = r"""<!doctype html>
                 e("textarea", {value:context, onChange:ev=>setContext(ev.target.value), placeholder:"Overall video context used in every translation prompt: character names, relationships, tone, slang, setting, story so far"}),
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:saveNotes}, "Save context"),
-                  e("button", {disabled:!selectedJobId, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Retranslate whole job with context"),
-                  e("button", {disabled:!selectedJobId || !includeAdapted, onClick:runCoherencePass}, "Run second-pass coherence review")
+                  e("button", {disabled:!selectedJobId || redoBusy, onClick:()=>post("/api/job/rebuild", {job_id:selectedJobId, batch_label:batchLabel, context, scene_contexts:notes, include_adapted_english:includeAdapted, prefer_fast_translation:preferFast})}, "Retranslate whole job with context"),
+                  e("button", {disabled:!selectedJobId || !includeAdapted || redoBusy, onClick:runCoherencePass}, "Run second-pass coherence review")
                 )
             ),
             panel("second-pass", "second-pass-panel", "Second-pass changes", e("span", null, status.rebuild_running ? "Running" : `${(job?.coherence_review || []).length} changes`), "panel-body stack",
@@ -1225,7 +1259,7 @@ HTML = r"""<!doctype html>
                 e("div", {className:"button-row"},
                   e("button", {className:"secondary", onClick:addNote}, "Add time-range context"),
                   e("button", {className:"secondary", disabled:!selectedJobId, onClick:saveNotes}, "Save all context ranges"),
-                  e("button", {disabled:!selectedJobId || (!selectedCueIndexes.length && (!noteStart || !noteEnd)), onClick:redoSelectedRange}, "Retranslate selected time range")
+                  e("button", {disabled:!selectedJobId || redoBusy || (!selectedCueIndexes.length && (!noteStart || !noteEnd)), onClick:redoSelectedRange}, "Retranslate selected time range")
                 ),
                 e("div", {className:"note-list"}, notes.length ? notes.map((item, index) => e("div", {className:"range-card", key:index},
                   e("div", {className:"range-card-head"},
@@ -1233,8 +1267,8 @@ HTML = r"""<!doctype html>
                     e("button", {className:"danger", onClick:()=>removeNote(index)}, "Remove")
                   ),
                   e("div", {className:"two-col"},
-                    e("input", {value:formatClock(Number(item.start_seconds || 0)), onChange:ev=>updateNote(index, {start_seconds:timeToSeconds(ev.target.value)}), placeholder:"Start time"}),
-                    e("input", {value:formatClock(Number(item.end_seconds || 0)), onChange:ev=>updateNote(index, {end_seconds:timeToSeconds(ev.target.value)}), placeholder:"End time"})
+                    e("input", {value:formatClock(Number(item.start_seconds || 0)), onChange:ev=>updateNoteTime(index, "start_seconds", ev.target.value, "start"), placeholder:"Start time"}),
+                    e("input", {value:formatClock(Number(item.end_seconds || 0)), onChange:ev=>updateNoteTime(index, "end_seconds", ev.target.value, "end"), placeholder:"End time"})
                   ),
                   e("textarea", {value:item.notes || "", onChange:ev=>updateNote(index, {notes:ev.target.value}), placeholder:"Context for this range"})
                 )) : e("div", {className:"empty"}, "No time-range context yet. Select subtitle lines above, add context, then save."))
@@ -1272,7 +1306,7 @@ HTML = r"""<!doctype html>
                 ) : null,
                 settingsDraft ? e("div", {className:"guided-grid"},
                   e("div", {className:"field"},
-                    e("label", null, "Local Japanese model folder"),
+                    e("label", null, "Local Kotoba/Hugging Face ASR folder"),
                     e("input", {value:settingsDraft.models?.asr || "", readOnly:true, placeholder:"Use dropdown or pick folder"})
                   ),
                   e("button", {className:"secondary", onClick:chooseAsrFolder}, "Pick ASR folder")
@@ -1306,7 +1340,7 @@ HTML = r"""<!doctype html>
                   e("button", {className:"secondary", onClick:chooseCacheFolder}, "Pick cache folder")
                 ) : null,
                 e("div", {className:"button-row"},
-                  e("button", {className:"danger", onClick:()=>post("/api/settings/reset", {}, applySettings)}, "Defaults")
+                  e("button", {className:"danger", onClick:()=>confirm("Reset app-wide model settings to defaults?") && post("/api/settings/reset", {}, applySettings)}, "Defaults")
                 )
             ),
             panel("diagnostics", "", "Health and redo log", e("span", null, status.rebuild_running ? "Redo live" : "Idle"), "panel-body diagnostics-grid",
@@ -1463,15 +1497,22 @@ STATE = WebTranscriberState()
 
 
 def _scene_contexts(data: list[dict[str, Any]] | None) -> list[SceneContextBlock]:
-    return [
-        SceneContextBlock(
-            start_seconds=float(item.get("start_seconds", 0)),
-            end_seconds=float(item.get("end_seconds", 0)),
-            notes=str(item.get("notes", "")).strip(),
-        )
-        for item in (data or [])
-        if str(item.get("notes", "")).strip()
-    ]
+    contexts: list[SceneContextBlock] = []
+    for item in data or []:
+        notes = str(item.get("notes", "")).strip()
+        if not notes:
+            continue
+        try:
+            start = float(item.get("start_seconds", 0))
+            end = float(item.get("end_seconds", 0))
+        except (TypeError, ValueError) as exc:
+            raise QueueError("Time-range context needs valid start and end times.") from exc
+        if not math.isfinite(start) or not math.isfinite(end):
+            raise QueueError("Time-range context needs valid start and end times.")
+        if end <= start:
+            raise QueueError("Each time-range context needs an end time after the start time.")
+        contexts.append(SceneContextBlock(start_seconds=start, end_seconds=end, notes=notes))
+    return contexts
 
 
 class WebServiceState:
@@ -1699,6 +1740,10 @@ class WebServiceState:
             return self.worker_process.pid
         return None
 
+    def _ensure_no_active_worker_or_redo(self) -> None:
+        if self._running(self.rebuild_process) or self.worker_pid():
+            raise RuntimeError("Another worker or redo task is already running.")
+
     def stop_worker(self) -> dict[str, Any]:
         self.service.store.set_pause(True)
         return {"message": "Worker will stop after the next safe step"}
@@ -1781,8 +1826,7 @@ class WebServiceState:
         return {"job_id": manifest.job_id}
 
     def rebuild(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._running(self.rebuild_process):
-            raise RuntimeError("Redo English is already running.")
+        self._ensure_no_active_worker_or_redo()
         job_id = str(payload["job_id"])
         self.save_notes(payload)
         command = [sys.executable, "-m", "local_subtitle_stack.cli", "rebuild-english", job_id]
@@ -1813,8 +1857,7 @@ class WebServiceState:
         return {"message": "Redo English started", "pid": self.rebuild_process.pid}
 
     def coherence_pass(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if self._running(self.rebuild_process):
-            raise RuntimeError("Redo English is already running.")
+        self._ensure_no_active_worker_or_redo()
         job_id = str(payload["job_id"])
         self.save_notes(payload)
         self.rebuild_log = ""
@@ -1891,7 +1934,12 @@ class WebServiceState:
         upload_dir.mkdir(parents=True, exist_ok=True)
         target = upload_dir / safe_name
         if target.exists():
-            target = upload_dir / f"{Path(safe_name).stem}-{len(list(upload_dir.glob(Path(safe_name).stem + '*')))}.srt"
+            stem = Path(safe_name).stem
+            suffix = Path(safe_name).suffix or ".srt"
+            index = 1
+            while target.exists():
+                target = upload_dir / f"{stem}-{index}{suffix}"
+                index += 1
         target.write_text(content, encoding="utf-8-sig")
         role = str(payload.get("role") or "direct")
         job_id = _optional_str(payload.get("job_id"))

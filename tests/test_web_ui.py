@@ -4,9 +4,11 @@ from types import SimpleNamespace
 import pytest
 
 from local_subtitle_stack.domain import JOB_STATUS_WORKING
+from local_subtitle_stack.queue import QueueError
 from local_subtitle_stack.web_ui import (
     HTML,
     WebServiceState,
+    _scene_contexts,
     close_other_web_ui_processes,
     count_completed_outputs,
     count_sources,
@@ -177,6 +179,87 @@ def test_web_ui_has_responsive_layout_shell() -> None:
     assert "/api/job/delete" in HTML
     assert "selectNewJob" in HTML
     assert "setSettingsDraft(current => current || data.settings)" in HTML
+    assert "const queueBusy = Boolean(status.worker_running || status.rebuild_running)" in HTML
+    assert "const redoBusy = queueBusy" in HTML
+    assert "status.running" not in HTML
+    assert 'asr_engine:"kotoba"' in HTML
+    assert "Local Kotoba/Hugging Face ASR folder" in HTML
+    assert "Reset app-wide model settings to defaults?" in HTML
+    assert "hasValidRange" in HTML
+    assert "Use a valid start and end time for this context range." in HTML
+    assert "End time must be after start time." in HTML
+    assert "Use a valid start and end time before retranslating this range." in HTML
+    assert "disabled:!selectedJobId || redoBusy" in HTML
+    assert "disabled:!selectedJobId || !includeAdapted || redoBusy" in HTML
+    assert "disabled:!selectedJobId || redoBusy || (!selectedCueIndexes.length" in HTML
+
+
+def test_scene_contexts_reject_invalid_ranges() -> None:
+    contexts = _scene_contexts(
+        [
+            {"start_seconds": "1.5", "end_seconds": "3.25", "notes": "  speaker context  "},
+            {"start_seconds": "4", "end_seconds": "5", "notes": "   "},
+        ]
+    )
+
+    assert len(contexts) == 1
+    assert contexts[0].start_seconds == 1.5
+    assert contexts[0].end_seconds == 3.25
+    assert contexts[0].notes == "speaker context"
+
+    with pytest.raises(QueueError, match="valid start and end"):
+        _scene_contexts([{"start_seconds": None, "end_seconds": 3, "notes": "bad"}])
+
+    with pytest.raises(QueueError, match="end time after"):
+        _scene_contexts([{"start_seconds": 4, "end_seconds": 3, "notes": "bad"}])
+
+
+def test_rebuild_and_coherence_refuse_active_worker_lock() -> None:
+    class FakeStore:
+        def active_worker_pid(self) -> int:
+            return 123
+
+    class FakeService:
+        store = FakeStore()
+
+        def save_job_notes(self, *_args, **_kwargs):
+            raise AssertionError("redo must not save notes while worker lock is active")
+
+    state = WebServiceState.__new__(WebServiceState)
+    state.service = FakeService()
+    state.worker_process = None
+    state.rebuild_process = None
+
+    with pytest.raises(RuntimeError, match="Another worker or redo task"):
+        state.rebuild({"job_id": "job-1"})
+
+    with pytest.raises(RuntimeError, match="Another worker or redo task"):
+        state.coherence_pass({"job_id": "job-1"})
+
+
+def test_upload_subtitle_uses_next_unique_filename(tmp_path: Path) -> None:
+    class FakeService:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(queue_root_path=tmp_path, default_profile="conservative")
+            self.imported: dict | None = None
+
+        def import_existing(self, **kwargs):
+            self.imported = kwargs
+            return SimpleNamespace(job_id="job-1")
+
+    upload_dir = tmp_path / "web-imports"
+    upload_dir.mkdir()
+    (upload_dir / "sample.srt").write_text("old", encoding="utf-8")
+    (upload_dir / "sample-1.srt").write_text("older", encoding="utf-8")
+
+    state = WebServiceState.__new__(WebServiceState)
+    state.service = FakeService()
+
+    result = state.upload_subtitle({"filename": "sample.srt", "content": "new subtitle", "role": "direct"})
+
+    assert Path(result["path"]).name == "sample-2.srt"
+    assert Path(result["path"]).read_text(encoding="utf-8-sig") == "new subtitle"
+    assert state.service.imported["direct"] == Path(result["path"])
 
 
 def test_resume_stuck_job_stops_owned_worker_before_requeue(monkeypatch) -> None:
